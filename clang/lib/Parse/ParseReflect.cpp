@@ -23,6 +23,26 @@
 using namespace clang;
 
 ExprResult Parser::ParseCXXReflectExpression(SourceLocation OpLoc) {
+  // ^^{ expr } — expression reflection.
+  if (Tok.is(tok::l_brace)) {
+    BalancedDelimiterTracker Braces(*this, tok::l_brace);
+    Braces.consumeOpen();
+
+    EnterExpressionEvaluationContext EvalContext(
+        Actions, Sema::ExpressionEvaluationContext::Unevaluated);
+
+    ExprResult Operand = ParseExpression();
+    if (Operand.isInvalid()) {
+      Braces.skipToEnd();
+      return ExprError();
+    }
+
+    Braces.consumeClose();
+    return Actions.BuildCXXReflectExpressionExpr(
+        OpLoc, Braces.getOpenLocation(), Operand.get(),
+        Braces.getCloseLocation());
+  }
+
   SourceLocation OperandLoc = Tok.getLocation();
 
   Sema::ConstevalOnlyRecorder RecordConstevalOnly(Actions);

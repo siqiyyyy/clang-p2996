@@ -15648,6 +15648,11 @@ public:
   ExprResult BuildCXXReflectExpr(SourceLocation OperatorLoc,
                                  CXXSpliceExpr *E);
 
+  ExprResult BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
+                                           SourceLocation LBraceLoc,
+                                           Expr *E,
+                                           SourceLocation RBraceLoc);
+
   ExprResult BuildCXXMetafunctionExpr(SourceLocation KwLoc,
                                       SourceLocation LParenLoc,
                                       SourceLocation RParenLoc,

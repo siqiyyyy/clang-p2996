@@ -584,6 +584,15 @@ enum : unsigned {
   // Other bespoke functions (not proposed at this time)
   __metafn_is_access_specified,
   __metafn_reflect_invoke,
+
+  // Expression reflection metafunctions
+  __metafn_is_expression,
+  __metafn_expression_kind_of,
+  __metafn_expression_operator_of,
+  __metafn_get_begin_operand_of,
+  __metafn_get_next_operand_of,
+  __metafn_expression_callee_of,
+  __metafn_expression_declaration_of,
 };
 
 consteval auto __workaround_expand_compiler_builtins(info type) -> info;
@@ -2299,6 +2308,51 @@ consteval auto reflect_invoke(info target, R1 &&targs, R2 &&args) -> info {
                             vargs.data(), vargs.size());
     }
   }
+}
+
+// =============================================================================
+// Expression reflection API
+// =============================================================================
+
+enum class expr_kind : size_t {
+  literal = 0,
+  decl_ref = 1,
+  binary_op = 2,
+  unary_op = 3,
+  call = 4,
+  member_access = 5,
+  conditional = 6,
+  cast = 7,
+  construct = 8,
+  subscript = 9,
+  comma = 10,
+};
+
+consteval bool is_expression(info r) {
+  return __metafunction(detail::__metafn_is_expression, r);
+}
+
+consteval expr_kind expression_kind_of(info r) {
+  return static_cast<expr_kind>(
+      __metafunction(detail::__metafn_expression_kind_of, r));
+}
+
+consteval auto operands_of(info r) -> vector<info> {
+  vector<info> result;
+  info child = __metafunction(detail::__metafn_get_begin_operand_of, r);
+  while (is_expression(child)) {
+    result.push_back(child);
+    child = __metafunction(detail::__metafn_get_next_operand_of, r, child);
+  }
+  return result;
+}
+
+consteval info callee_of(info r) {
+  return __metafunction(detail::__metafn_expression_callee_of, r);
+}
+
+consteval info declaration_of(info r) {
+  return __metafunction(detail::__metafn_expression_declaration_of, r);
 }
 
 

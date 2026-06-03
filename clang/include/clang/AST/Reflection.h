@@ -119,6 +119,13 @@ enum class ReflectionKind {
 
   /// \brief A reflection of an attribute (P3385).
   Attribute,
+
+  /// \brief A reflection of an expression tree (unevaluated).
+  ///
+  /// Corresponds to an Expr* representing the structure of an expression
+  /// without evaluating it. Used for compile-time expression transformation
+  /// (e.g., automatic differentiation).
+  Expression,
 };
 
 /// \brief Representation of a hypothetical data member, which could be used to

@@ -1013,6 +1013,17 @@ ExprDependence clang::computeDependence(CXXReflectExpr *E,
   case ReflectionKind::EnumeratorSpec:
   case ReflectionKind::Attribute:
     return ExprDependence::None;
+  case ReflectionKind::Expression: {
+    Expr *Inner = RV.getReflectedExpression();
+    ExprDependence ED = ExprDependence::None;
+    if (Inner->isValueDependent())
+      ED |= ExprDependence::ValueInstantiation;
+    if (Inner->isTypeDependent())
+      ED |= ExprDependence::Type;
+    if (Inner->containsUnexpandedParameterPack())
+      ED |= ExprDependence::UnexpandedPack;
+    return ED;
+  }
   case ReflectionKind::EntityProxy:
     llvm_unreachable("should already have been unwrapped");
   }

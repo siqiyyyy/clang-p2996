@@ -5067,6 +5067,11 @@ void CXXNameMangler::mangleReflection(const APValue &R) {
     mangleExpression(R.getReflectedAnnotation()->getArg());
     break;
   }
+  case ReflectionKind::Expression: {
+    Out << 'x';
+    mangleExpression(R.getReflectedExpression());
+    break;
+  }
   }
   Out << 'E';
 }

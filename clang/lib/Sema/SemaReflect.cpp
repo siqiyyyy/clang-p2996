@@ -1342,6 +1342,18 @@ ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc, Expr *E) {
   return ExprError();
 }
 
+ExprResult Sema::BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
+                                               SourceLocation LBraceLoc,
+                                               Expr *E,
+                                               SourceLocation RBraceLoc) {
+  if (E->isValueDependent() || E->isTypeDependent())
+    return CXXReflectExpr::Create(Context, OperatorLoc, E);
+
+  APValue RV(ReflectionKind::Expression, E);
+  return CXXReflectExpr::Create(Context, OperatorLoc,
+                                SourceRange(LBraceLoc, RBraceLoc), RV);
+}
+
 ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
                                      UnresolvedLookupExpr *E) {
   // If the UnresolvedLookupExpr could refer to multiple candidates, there
@@ -1839,6 +1851,15 @@ ExprResult Sema::BuildReflectionSpliceExpr(SourceLocation TemplateKWLoc,
                                      Splice, Result, AllowMemberReference);
       break;
     }
+    case ReflectionKind::Expression: {
+      Expr *E = Refl.getReflectedExpression();
+      Result = E;
+      Result = CXXSpliceExpr::Create(Context,
+                                     E->isLValue() ? VK_LValue : VK_PRValue,
+                                     TemplateKWLoc, Splice, Result,
+                                     AllowMemberReference);
+      break;
+    }
     case ReflectionKind::Null:
     case ReflectionKind::Type:
     case ReflectionKind::Namespace:
@@ -1984,6 +2005,7 @@ DeclContext *Sema::TryFindDeclContextOf(SpliceSpecifier *Splice) {
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
+  case ReflectionKind::Expression:
     Diag(Splice->getBeginLoc(), diag::err_expected_class_or_namespace)
         << "spliced entity" << getLangOpts().CPlusPlus;
     return nullptr;
