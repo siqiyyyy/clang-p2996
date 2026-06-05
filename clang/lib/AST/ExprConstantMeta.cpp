@@ -821,6 +821,11 @@ static bool expression_declaration_of(APValue &Result, ASTContext &C,
                                       QualType ResultTy, SourceRange Range,
                                       ArrayRef<Expr *> Args,
                                       Decl *ContainingDecl);
+static bool make_expr_impl(APValue &Result, ASTContext &C, MetaActions &Meta,
+                           EvalFn Evaluator, DiagFn Diagnoser,
+                           bool AllowInjection, QualType ResultTy,
+                           SourceRange Range, ArrayRef<Expr *> Args,
+                           Decl *ContainingDecl);
 
 // -----------------------------------------------------------------------------
 // Metafunction table
@@ -977,6 +982,7 @@ static constexpr Metafunction Metafunctions[] = {
   { Metafunction::MFRK_metaInfo, 2, 2, get_next_operand_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_callee_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_declaration_of },
+  { Metafunction::MFRK_metaInfo, 2, 10, make_expr_impl },
 };
 constexpr const unsigned NumMetafunctions = sizeof(Metafunctions) /
                                             sizeof(Metafunction);
@@ -3196,6 +3202,21 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   APValue RV;
   if (!Evaluator(RV, Args[0], true))
     return true;
+
+  if (RV.isReflectedExpression()) {
+    Expr *E = RV.getReflectedExpression();
+    if (auto *FL = dyn_cast<FloatingLiteral>(E)) {
+      APValue Val(FL->getValue());
+      return SetAndSucceed(Result, Val.Lift(FL->getType()));
+    }
+    if (auto *IL = dyn_cast<IntegerLiteral>(E)) {
+      APValue Val(llvm::APSInt(IL->getValue(),
+                         IL->getType()->isUnsignedIntegerType()));
+      return SetAndSucceed(Result, Val.Lift(IL->getType()));
+    }
+    return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+        << 2 << "a non-literal expression" << Range;
+  }
 
   switch (RV.getReflectionKind()) {
   case ReflectionKind::Value:
@@ -7514,6 +7535,15 @@ bool get_begin_operand_of(APValue &Result, ASTContext &C, MetaActions &Meta,
 
   Expr *E = RV.getReflectedExpression();
 
+  // For call expressions, return only the arguments (callee via callee_of).
+  if (auto *CE = dyn_cast<CallExpr>(E)) {
+    for (auto *Arg : CE->arguments()) {
+      APValue ChildRV(ReflectionKind::Expression, Arg);
+      return SetAndSucceed(Result, ChildRV);
+    }
+    return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+  }
+
   // Return the first child expression, or a null reflection if none.
   for (auto *Child : E->children()) {
     if (auto *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
@@ -7545,6 +7575,20 @@ bool get_next_operand_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   Expr *Current = CurrentRV.isReflectedExpression()
                       ? CurrentRV.getReflectedExpression()
                       : nullptr;
+
+  // For call expressions, iterate only over arguments (not callee).
+  if (auto *CE = dyn_cast<CallExpr>(Parent)) {
+    bool FoundCurrent = false;
+    for (auto *Arg : CE->arguments()) {
+      if (FoundCurrent) {
+        APValue ChildRV(ReflectionKind::Expression, Arg);
+        return SetAndSucceed(Result, ChildRV);
+      }
+      if (Arg == Current)
+        FoundCurrent = true;
+    }
+    return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+  }
 
   bool FoundCurrent = false;
   for (auto *Child : Parent->children()) {
@@ -7616,6 +7660,309 @@ bool expression_declaration_of(APValue &Result, ASTContext &C,
 
   APValue DeclRV(ReflectionKind::Declaration, DRE->getDecl());
   return SetAndSucceed(Result, DeclRV);
+}
+
+// Helper: Ensure an expression is an rvalue by wrapping lvalues in an implicit
+// LValueToRValue cast.
+static Expr *ensureRValue(Expr *E, ASTContext &C) {
+  if (E->isLValue()) {
+    QualType Ty = E->getType().getNonReferenceType();
+    return ImplicitCastExpr::Create(C, Ty, CK_LValueToRValue, E, nullptr,
+                                    VK_PRValue, FPOptionsOverride());
+  }
+  return E;
+}
+
+// Map P2996 operators enum index → BinaryOperatorKind.
+static std::optional<BinaryOperatorKind>
+operatorIndexToBinaryOp(size_t OpIdx) {
+  static constexpr OverloadedOperatorKind OperatorIndices[] = {
+    OO_None, OO_New, OO_Delete, OO_Array_New, OO_Array_Delete, OO_Coawait,
+    OO_Call, OO_Subscript, OO_Arrow, OO_ArrowStar, OO_Tilde, OO_Exclaim,
+    OO_Plus, OO_Minus, OO_Star, OO_Slash, OO_Percent, OO_Caret, OO_Amp,
+    OO_Pipe, OO_Equal, OO_PlusEqual, OO_MinusEqual, OO_StarEqual,
+    OO_SlashEqual, OO_PercentEqual, OO_CaretEqual, OO_AmpEqual, OO_PipeEqual,
+    OO_EqualEqual, OO_ExclaimEqual, OO_Less, OO_Greater, OO_LessEqual,
+    OO_GreaterEqual, OO_Spaceship, OO_AmpAmp, OO_PipePipe, OO_LessLess,
+    OO_GreaterGreater, OO_LessLessEqual, OO_GreaterGreaterEqual, OO_PlusPlus,
+    OO_MinusMinus, OO_Comma,
+  };
+
+  if (OpIdx >= std::size(OperatorIndices))
+    return std::nullopt;
+
+  OverloadedOperatorKind OO = OperatorIndices[OpIdx];
+  switch (OO) {
+  case OO_Plus:         return BO_Add;
+  case OO_Minus:        return BO_Sub;
+  case OO_Star:         return BO_Mul;
+  case OO_Slash:        return BO_Div;
+  case OO_Percent:      return BO_Rem;
+  case OO_Amp:          return BO_And;
+  case OO_Pipe:         return BO_Or;
+  case OO_Caret:        return BO_Xor;
+  case OO_LessLess:     return BO_Shl;
+  case OO_GreaterGreater: return BO_Shr;
+  case OO_EqualEqual:   return BO_EQ;
+  case OO_ExclaimEqual: return BO_NE;
+  case OO_Less:         return BO_LT;
+  case OO_Greater:      return BO_GT;
+  case OO_LessEqual:    return BO_LE;
+  case OO_GreaterEqual: return BO_GE;
+  case OO_AmpAmp:       return BO_LAnd;
+  case OO_PipePipe:     return BO_LOr;
+  case OO_Equal:        return BO_Assign;
+  case OO_Comma:        return BO_Comma;
+  case OO_PlusEqual:    return BO_AddAssign;
+  case OO_MinusEqual:   return BO_SubAssign;
+  case OO_StarEqual:    return BO_MulAssign;
+  case OO_SlashEqual:   return BO_DivAssign;
+  case OO_PercentEqual: return BO_RemAssign;
+  case OO_AmpEqual:     return BO_AndAssign;
+  case OO_PipeEqual:    return BO_OrAssign;
+  case OO_CaretEqual:   return BO_XorAssign;
+  case OO_LessLessEqual:     return BO_ShlAssign;
+  case OO_GreaterGreaterEqual: return BO_ShrAssign;
+  default: return std::nullopt;
+  }
+}
+
+// Map P2996 operators enum index → UnaryOperatorKind.
+static std::optional<UnaryOperatorKind>
+operatorIndexToUnaryOp(size_t OpIdx) {
+  static constexpr OverloadedOperatorKind OperatorIndices[] = {
+    OO_None, OO_New, OO_Delete, OO_Array_New, OO_Array_Delete, OO_Coawait,
+    OO_Call, OO_Subscript, OO_Arrow, OO_ArrowStar, OO_Tilde, OO_Exclaim,
+    OO_Plus, OO_Minus, OO_Star, OO_Slash, OO_Percent, OO_Caret, OO_Amp,
+    OO_Pipe, OO_Equal, OO_PlusEqual, OO_MinusEqual, OO_StarEqual,
+    OO_SlashEqual, OO_PercentEqual, OO_CaretEqual, OO_AmpEqual, OO_PipeEqual,
+    OO_EqualEqual, OO_ExclaimEqual, OO_Less, OO_Greater, OO_LessEqual,
+    OO_GreaterEqual, OO_Spaceship, OO_AmpAmp, OO_PipePipe, OO_LessLess,
+    OO_GreaterGreater, OO_LessLessEqual, OO_GreaterGreaterEqual, OO_PlusPlus,
+    OO_MinusMinus, OO_Comma,
+  };
+
+  if (OpIdx >= std::size(OperatorIndices))
+    return std::nullopt;
+
+  OverloadedOperatorKind OO = OperatorIndices[OpIdx];
+  switch (OO) {
+  case OO_Minus:     return UO_Minus;
+  case OO_Plus:      return UO_Plus;
+  case OO_Tilde:     return UO_Not;
+  case OO_Exclaim:   return UO_LNot;
+  case OO_PlusPlus:  return UO_PreInc;
+  case OO_MinusMinus: return UO_PreDec;
+  case OO_Star:      return UO_Deref;
+  case OO_Amp:       return UO_AddrOf;
+  default: return std::nullopt;
+  }
+}
+
+bool make_expr_impl(APValue &Result, ASTContext &C, MetaActions &Meta,
+                    EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                    QualType ResultTy, SourceRange Range,
+                    ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  // Args[0] = kind (size_t), Args[1] = context (info),
+  // Args[2..4] = optional children (info)
+
+  APValue KindRV;
+  if (!Evaluator(KindRV, Args[0], true))
+    return true;
+  assert(KindRV.isInt());
+  size_t Kind = KindRV.getInt().getZExtValue();
+
+  APValue ContextRV;
+  if (!Evaluator(ContextRV, Args[1], true))
+    return true;
+
+  // Evaluate children
+  SmallVector<Expr *, 3> Children;
+  for (unsigned I = 2; I < Args.size(); ++I) {
+    APValue ChildRV;
+    if (!Evaluator(ChildRV, Args[I], true))
+      return true;
+    if (!ChildRV.isReflectedExpression()) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "an expression" << Range;
+      return true;
+    }
+    Children.push_back(ChildRV.getReflectedExpression());
+  }
+
+  SourceLocation Loc = Range.getBegin();
+  Expr *ResultExpr = nullptr;
+
+  switch (Kind) {
+  case 0: { // literal
+    if (!ContextRV.isReflectedValue()) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "a value" << Range;
+      return true;
+    }
+    QualType LitTy = ContextRV.getTypeOfReflectedResult(C);
+    APValue InnerVal = ContextRV.getReflectedValue();
+
+    if (InnerVal.isFloat()) {
+      ResultExpr = FloatingLiteral::Create(
+          C, InnerVal.getFloat(), /*isexact=*/true, LitTy, Loc);
+    } else if (InnerVal.isInt()) {
+      ResultExpr = IntegerLiteral::Create(C, InnerVal.getInt(), LitTy, Loc);
+    } else {
+      Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+          << 0 << "unsupported literal type" << Range;
+      return true;
+    }
+    break;
+  }
+
+  case 1: { // decl_ref
+    ValueDecl *VD = nullptr;
+    if (ContextRV.isReflection()) {
+      auto RK = ContextRV.getReflectionKind();
+      if (RK == ReflectionKind::Declaration)
+        VD = ContextRV.getReflectedDecl();
+      else if (RK == ReflectionKind::Parameter)
+        VD = ContextRV.getReflectedParameter();
+    }
+    if (!VD) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "a variable or parameter declaration" << Range;
+      return true;
+    }
+    QualType DeclTy = VD->getType().getNonReferenceType();
+    ResultExpr = DeclRefExpr::Create(C, NestedNameSpecifierLoc(), Loc,
+                                     VD, /*RefersToEnclosingVariableOrCapture=*/false,
+                                     Loc, DeclTy, VK_LValue);
+    break;
+  }
+
+  case 2: { // binary_op
+    if (Children.size() != 2) {
+      Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+          << 0 << "binary_op requires exactly 2 children" << Range;
+      return true;
+    }
+    if (!ContextRV.isReflectedValue()) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "an operator constant" << Range;
+      return true;
+    }
+    APValue OpVal = ContextRV.getReflectedValue();
+    size_t OpIdx = OpVal.getInt().getZExtValue();
+    auto MaybeBOK = operatorIndexToBinaryOp(OpIdx);
+    if (!MaybeBOK) {
+      Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+          << 0 << "invalid binary operator" << Range;
+      return true;
+    }
+
+    Expr *LHS = ensureRValue(Children[0], C);
+    Expr *RHS = ensureRValue(Children[1], C);
+    QualType ResTy = LHS->getType();
+    if (BinaryOperator::isComparisonOp(*MaybeBOK) ||
+        BinaryOperator::isLogicalOp(*MaybeBOK))
+      ResTy = C.BoolTy;
+
+    ResultExpr = BinaryOperator::Create(C, LHS, RHS, *MaybeBOK, ResTy,
+                                        VK_PRValue, OK_Ordinary, Loc,
+                                        FPOptionsOverride());
+    break;
+  }
+
+  case 3: { // unary_op
+    if (Children.size() != 1) {
+      Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+          << 0 << "unary_op requires exactly 1 child" << Range;
+      return true;
+    }
+    if (!ContextRV.isReflectedValue()) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "an operator constant" << Range;
+      return true;
+    }
+    APValue OpVal = ContextRV.getReflectedValue();
+    size_t OpIdx = OpVal.getInt().getZExtValue();
+    auto MaybeUOK = operatorIndexToUnaryOp(OpIdx);
+    if (!MaybeUOK) {
+      Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+          << 0 << "invalid unary operator" << Range;
+      return true;
+    }
+
+    Expr *Operand = ensureRValue(Children[0], C);
+    QualType ResTy = Operand->getType();
+
+    ResultExpr = UnaryOperator::Create(C, Operand, *MaybeUOK, ResTy,
+                                       VK_PRValue, OK_Ordinary, Loc,
+                                       /*CanOverflow=*/false,
+                                       FPOptionsOverride());
+    break;
+  }
+
+  case 4: { // call
+    FunctionDecl *FD = nullptr;
+    if (ContextRV.isReflection()) {
+      auto RK = ContextRV.getReflectionKind();
+      if (RK == ReflectionKind::Declaration) {
+        FD = dyn_cast<FunctionDecl>(ContextRV.getReflectedDecl());
+      }
+    }
+    if (!FD) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "a function declaration" << Range;
+      return true;
+    }
+
+    QualType FnTy = FD->getType();
+    Expr *CalleeDRE = DeclRefExpr::Create(
+        C, NestedNameSpecifierLoc(), Loc, FD,
+        /*RefersToEnclosingVariableOrCapture=*/false, Loc, FnTy, VK_LValue);
+
+    // Codegen expects callee to be a function pointer, not a bare function type
+    QualType FnPtrTy = C.getPointerType(FnTy);
+    Expr *CalleePtr = ImplicitCastExpr::Create(
+        C, FnPtrTy, CK_FunctionToPointerDecay, CalleeDRE, nullptr,
+        VK_PRValue, FPOptionsOverride());
+
+    // Wrap children as rvalue args
+    SmallVector<Expr *, 4> CallArgs;
+    for (auto *Child : Children)
+      CallArgs.push_back(ensureRValue(Child, C));
+
+    QualType RetTy = FD->getReturnType();
+    ResultExpr = CallExpr::Create(C, CalleePtr, CallArgs, RetTy, VK_PRValue,
+                                  Loc, FPOptionsOverride());
+    break;
+  }
+
+  case 7: { // cast
+    if (Children.size() != 1) {
+      Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+          << 0 << "cast requires exactly 1 child" << Range;
+      return true;
+    }
+    if (!ContextRV.isReflectedType()) {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "a type" << Range;
+      return true;
+    }
+    QualType TargetTy = ContextRV.getReflectedType();
+    Expr *Operand = Children[0];
+
+    ResultExpr = ImplicitCastExpr::Create(C, TargetTy, CK_NoOp, Operand,
+                                          nullptr, VK_PRValue,
+                                          FPOptionsOverride());
+    break;
+  }
+
+  default:
+    Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
+        << 0 << "unsupported expression kind for make_expr" << Range;
+    return true;
+  }
+
+  return SetAndSucceed(Result, APValue(ReflectionKind::Expression, ResultExpr));
 }
 
 }  // end namespace clang

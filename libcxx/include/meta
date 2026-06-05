@@ -593,6 +593,7 @@ enum : unsigned {
   __metafn_get_next_operand_of,
   __metafn_expression_callee_of,
   __metafn_expression_declaration_of,
+  __metafn_make_expr,
 };
 
 consteval auto __workaround_expand_compiler_builtins(info type) -> info;
@@ -890,6 +891,9 @@ using enum operators;
 // Returns the operator overloaded by the represented operator function or
 // operator function template.
 consteval auto operator_of(info r) -> operators {
+  if (__metafunction(detail::__metafn_is_expression, r))
+    return operators(
+        __metafunction(detail::__metafn_expression_operator_of, r));
   return operators(__metafunction(detail::__metafn_operator_of, r));
 }
 
@@ -2353,6 +2357,46 @@ consteval info callee_of(info r) {
 
 consteval info declaration_of(info r) {
   return __metafunction(detail::__metafn_expression_declaration_of, r);
+}
+
+consteval info make_expr(expr_kind kind, info context,
+                         vector<info> children = {}) {
+  size_t k = static_cast<size_t>(kind);
+  switch (children.size()) {
+    case 0:
+      return __metafunction(detail::__metafn_make_expr, k, context);
+    case 1:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0]);
+    case 2:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1]);
+    case 3:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1], children[2]);
+    case 4:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1], children[2],
+                            children[3]);
+    case 5:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1], children[2],
+                            children[3], children[4]);
+    case 6:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1], children[2],
+                            children[3], children[4], children[5]);
+    case 7:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1], children[2],
+                            children[3], children[4], children[5],
+                            children[6]);
+    default:
+      return __metafunction(detail::__metafn_make_expr, k, context,
+                            children[0], children[1], children[2],
+                            children[3], children[4], children[5],
+                            children[6], children[7]);
+  }
 }
 
 
