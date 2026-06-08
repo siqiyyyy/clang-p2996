@@ -5454,8 +5454,14 @@ class CXXReflectExpr : public Expr {
   SourceLocation OperatorLoc;
   SourceRange OperandRange;
 
+  // True when this was created by ^^{ expr } syntax (expression reflection),
+  // as opposed to ^^entity (entity reflection). Needed so that template
+  // instantiation dispatches to the right Build function.
+  bool IsExpressionReflection = false;
+
   CXXReflectExpr(const ASTContext &C, QualType ExprTy, APValue RV);
-  CXXReflectExpr(const ASTContext &C, QualType ExprTy, Expr *DepSubExpr);
+  CXXReflectExpr(const ASTContext &C, QualType ExprTy, Expr *DepSubExpr,
+                 bool IsExprReflection = false);
   CXXReflectExpr(EmptyShell Empty);
 
 public:
@@ -5463,6 +5469,8 @@ public:
                                 SourceRange OperandRange, APValue RV);
   static CXXReflectExpr *Create(ASTContext &C, SourceLocation OperatorLoc,
                                 Expr *DepSubExpr);
+  static CXXReflectExpr *Create(ASTContext &C, SourceLocation OperatorLoc,
+                                Expr *DepSubExpr, bool IsExprReflection);
   static CXXReflectExpr *CreateEmpty(const ASTContext &C);
 
   /// Returns the operand of the reflection expression.
@@ -5477,6 +5485,9 @@ public:
   bool hasDependentSubExpr() const {
     return Kind == OperandKind::DependentExpr;
   }
+
+  bool isExpressionReflection() const { return IsExpressionReflection; }
+  void setIsExpressionReflection(bool V) { IsExpressionReflection = V; }
 
   SourceLocation getBeginLoc() const LLVM_READONLY { return OperatorLoc; }
   SourceLocation getEndLoc() const LLVM_READONLY {

@@ -2600,6 +2600,11 @@ TemplateInstantiator::TransformCXXReflectExpr(CXXReflectExpr *E) {
     if (Result.isInvalid())
       return ExprError();
 
+    if (E->isExpressionReflection())
+      return RecordConsteval.RecordAndReturn(
+              getSema().BuildCXXReflectExpressionExpr(E->getOperatorLoc(),
+                                                     Result.get()));
+
     return RecordConsteval.RecordAndReturn(
             getSema().BuildCXXReflectExpr(E->getOperatorLoc(), Result.get()));
   }

@@ -15652,6 +15652,8 @@ public:
                                            SourceLocation LBraceLoc,
                                            Expr *E,
                                            SourceLocation RBraceLoc);
+  ExprResult BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
+                                           Expr *E);
 
   ExprResult BuildCXXMetafunctionExpr(SourceLocation KwLoc,
                                       SourceLocation LParenLoc,

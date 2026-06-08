@@ -1940,9 +1940,10 @@ CXXReflectExpr::CXXReflectExpr(EmptyShell Empty)
 }
 
 CXXReflectExpr::CXXReflectExpr(const ASTContext &C, QualType ExprTy,
-                               Expr *DepSubExpr)
+                               Expr *DepSubExpr, bool IsExprReflection)
     : Expr(CXXReflectExprClass, ExprTy, VK_PRValue, OK_Ordinary),
-      Kind(OperandKind::DependentExpr) {
+      Kind(OperandKind::DependentExpr),
+      IsExpressionReflection(IsExprReflection) {
   assert(DepSubExpr->isValueDependent() &&
          "reflection operand must be a reflection or a dependent expression");
 
@@ -1963,6 +1964,17 @@ CXXReflectExpr *CXXReflectExpr::Create(ASTContext &C,
                                        SourceLocation OperatorLoc,
                                        Expr *DepSubExpr) {
   CXXReflectExpr *E = new (C) CXXReflectExpr(C, C.MetaInfoTy, DepSubExpr);
+  E->setOperatorLoc(OperatorLoc);
+  E->setOperandRange(DepSubExpr->getSourceRange());
+  return E;
+}
+
+CXXReflectExpr *CXXReflectExpr::Create(ASTContext &C,
+                                       SourceLocation OperatorLoc,
+                                       Expr *DepSubExpr,
+                                       bool IsExprReflection) {
+  CXXReflectExpr *E = new (C) CXXReflectExpr(C, C.MetaInfoTy, DepSubExpr,
+                                              IsExprReflection);
   E->setOperatorLoc(OperatorLoc);
   E->setOperandRange(DepSubExpr->getSourceRange());
   return E;

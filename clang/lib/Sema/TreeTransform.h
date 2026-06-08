@@ -9000,6 +9000,11 @@ TreeTransform<Derived>::TransformCXXReflectExpr(CXXReflectExpr *E) {
     if (Result.isInvalid())
       return ExprError();
 
+    if (E->isExpressionReflection())
+      return RecordConstevalOnly.RecordAndReturn(
+              getSema().BuildCXXReflectExpressionExpr(E->getOperatorLoc(),
+                                                     Result.get()));
+
     return RecordConstevalOnly.RecordAndReturn(
             getSema().BuildCXXReflectExpr(E->getOperatorLoc(),
                                           Result.get()));

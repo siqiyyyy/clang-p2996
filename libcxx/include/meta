@@ -2355,6 +2355,18 @@ consteval info declaration_of(info r) {
   return __metafunction(detail::__metafn_expression_declaration_of, r);
 }
 
+consteval operators expression_operator_of(info r) {
+  return operators(__metafunction(detail::__metafn_expression_operator_of, r));
+}
+
+consteval info first_operand_of(info r) {
+  return __metafunction(detail::__metafn_get_begin_operand_of, r);
+}
+
+consteval info next_operand_of(info parent, info current) {
+  return __metafunction(detail::__metafn_get_next_operand_of, parent, current);
+}
+
 
 // Representation of a data member which may be passed to 'data_member_spec'.
 struct data_member_options {

@@ -1347,11 +1347,23 @@ ExprResult Sema::BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
                                                Expr *E,
                                                SourceLocation RBraceLoc) {
   if (E->isValueDependent() || E->isTypeDependent())
-    return CXXReflectExpr::Create(Context, OperatorLoc, E);
+    return CXXReflectExpr::Create(Context, OperatorLoc, E,
+                                  /*IsExprReflection=*/true);
 
   APValue RV(ReflectionKind::Expression, E);
   return CXXReflectExpr::Create(Context, OperatorLoc,
                                 SourceRange(LBraceLoc, RBraceLoc), RV);
+}
+
+ExprResult Sema::BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
+                                               Expr *E) {
+  if (E->isValueDependent() || E->isTypeDependent())
+    return CXXReflectExpr::Create(Context, OperatorLoc, E,
+                                  /*IsExprReflection=*/true);
+
+  APValue RV(ReflectionKind::Expression, E);
+  return CXXReflectExpr::Create(Context, OperatorLoc,
+                                E->getSourceRange(), RV);
 }
 
 ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,

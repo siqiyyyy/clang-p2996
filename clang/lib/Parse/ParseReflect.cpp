@@ -29,7 +29,7 @@ ExprResult Parser::ParseCXXReflectExpression(SourceLocation OpLoc) {
     Braces.consumeOpen();
 
     EnterExpressionEvaluationContext EvalContext(
-        Actions, Sema::ExpressionEvaluationContext::Unevaluated);
+        Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated);
 
     ExprResult Operand = ParseExpression();
     if (Operand.isInvalid()) {
