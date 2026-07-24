@@ -1024,6 +1024,18 @@ ExprDependence clang::computeDependence(CXXReflectExpr *E,
       ED |= ExprDependence::UnexpandedPack;
     return ED;
   }
+  case ReflectionKind::ReturnStatement: {
+    ExprDependence ED = ExprDependence::None;
+    if (Expr *Inner = RV.getReflectedReturnStatement()->getRetValue()) {
+      if (Inner->isValueDependent())
+        ED |= ExprDependence::ValueInstantiation;
+      if (Inner->isTypeDependent())
+        ED |= ExprDependence::Type;
+      if (Inner->containsUnexpandedParameterPack())
+        ED |= ExprDependence::UnexpandedPack;
+    }
+    return ED;
+  }
   case ReflectionKind::EntityProxy:
     llvm_unreachable("should already have been unwrapped");
   }

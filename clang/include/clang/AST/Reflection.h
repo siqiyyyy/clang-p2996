@@ -126,6 +126,13 @@ enum class ReflectionKind {
   /// without evaluating it. Used for compile-time expression transformation
   /// (e.g., automatic differentiation).
   Expression,
+
+  /// \brief A reflection of a return statement.
+  ///
+  /// Corresponds to a ReturnStmt* representing the structure of a return statement
+  /// without evaluating it. Used for compile-time expression transformation
+  /// (e.g., automatic differentiation).
+  ReturnStatement,
 };
 
 /// \brief Representation of a hypothetical data member, which could be used to

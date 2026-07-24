@@ -24,12 +24,35 @@ using namespace clang;
 
 ExprResult Parser::ParseCXXReflectExpression(SourceLocation OpLoc) {
   // ^^{ expr } — expression reflection.
+  // ^^{ return expr; } — return-statement reflection.
   if (Tok.is(tok::l_brace)) {
     BalancedDelimiterTracker Braces(*this, tok::l_brace);
     Braces.consumeOpen();
 
     EnterExpressionEvaluationContext EvalContext(
         Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+
+    // ^^{ return [expr] ; } — reflect the structure of a return statement.
+    if (Tok.is(tok::kw_return)) {
+      SourceLocation ReturnLoc = ConsumeToken();
+
+      ExprResult RetVal;
+      if (Tok.isNot(tok::semi) && Tok.isNot(tok::r_brace)) {
+        RetVal = ParseExpression();
+        if (RetVal.isInvalid()) {
+          Braces.skipToEnd();
+          return ExprError();
+        }
+      }
+
+      // An optional trailing semicolon is accepted inside the braces.
+      TryConsumeToken(tok::semi);
+
+      Braces.consumeClose();
+      return Actions.BuildCXXReflectReturnStmtExpr(
+          OpLoc, Braces.getOpenLocation(), ReturnLoc, RetVal.get(),
+          Braces.getCloseLocation());
+    }
 
     ExprResult Operand = ParseExpression();
     if (Operand.isInvalid()) {

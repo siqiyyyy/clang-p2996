@@ -1366,6 +1366,32 @@ ExprResult Sema::BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
                                 E->getSourceRange(), RV);
 }
 
+ExprResult Sema::BuildCXXReflectReturnStmtExpr(SourceLocation OperatorLoc,
+                                               SourceLocation LBraceLoc,
+                                               SourceLocation ReturnLoc,
+                                               Expr *RetVal,
+                                               SourceLocation RBraceLoc) {
+  // FIXME: Dependent return values are not yet supported: the operand would
+  // need to be rebuilt as a return-statement reflection during template
+  // instantiation (see TransformCXXReflectExpr). CXXReflectExpr's dependent
+  // slot can only hold an Expr*, so defer using the return-value expression
+  // for now; this currently yields an expression reflection on instantiation.
+  if (RetVal && (RetVal->isValueDependent() || RetVal->isTypeDependent()))
+    return CXXReflectExpr::Create(Context, OperatorLoc, RetVal,
+                                  /*IsExprReflection=*/true);
+
+  // Build the return-statement node structurally. We deliberately do not route
+  // through ActOnReturnStmt: a '^^{ return ... }' operand reflects the syntactic
+  // structure of the statement and need not appear inside a function with a
+  // matching return type.
+  ReturnStmt *S = ReturnStmt::Create(Context, ReturnLoc, RetVal,
+                                     /*NRVOCandidate=*/nullptr);
+
+  APValue RV(ReflectionKind::ReturnStatement, S);
+  return CXXReflectExpr::Create(Context, OperatorLoc,
+                                SourceRange(LBraceLoc, RBraceLoc), RV);
+}
+
 ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
                                      UnresolvedLookupExpr *E) {
   // If the UnresolvedLookupExpr could refer to multiple candidates, there
@@ -1880,6 +1906,7 @@ ExprResult Sema::BuildReflectionSpliceExpr(SourceLocation TemplateKWLoc,
     case ReflectionKind::DataMemberSpec:
     case ReflectionKind::Annotation:
     case ReflectionKind::Attribute:
+    case ReflectionKind::ReturnStatement:
       Diag(Splice->getBeginLoc(),
            diag::err_unexpected_reflection_kind_in_splice)
           << 1 << Splice->getSourceRange();
@@ -2018,6 +2045,7 @@ DeclContext *Sema::TryFindDeclContextOf(SpliceSpecifier *Splice) {
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     Diag(Splice->getBeginLoc(), diag::err_expected_class_or_namespace)
         << "spliced entity" << getLangOpts().CPlusPlus;
     return nullptr;

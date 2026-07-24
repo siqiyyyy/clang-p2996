@@ -593,6 +593,10 @@ enum : unsigned {
   __metafn_get_next_operand_of,
   __metafn_expression_callee_of,
   __metafn_expression_declaration_of,
+
+  // Return-statement reflection metafunctions
+  __metafn_is_return_statement,
+  __metafn_return_value_of,
 };
 
 consteval auto __workaround_expand_compiler_builtins(info type) -> info;
@@ -2365,6 +2369,21 @@ consteval info first_operand_of(info r) {
 
 consteval info next_operand_of(info parent, info current) {
   return __metafunction(detail::__metafn_get_next_operand_of, parent, current);
+}
+
+
+// =============================================================================
+// Return-statement reflection API
+// =============================================================================
+
+consteval bool is_return_statement(info r) {
+  return __metafunction(detail::__metafn_is_return_statement, r);
+}
+
+// Returns a reflection of the returned expression, or a null reflection for a
+// bare 'return;'.
+consteval info return_value_of(info r) {
+  return __metafunction(detail::__metafn_return_value_of, r);
 }
 
 

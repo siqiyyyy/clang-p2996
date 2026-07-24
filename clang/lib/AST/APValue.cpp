@@ -567,6 +567,7 @@ static void profileReflection(llvm::FoldingSetNodeID &ID, APValue V) {
   case ReflectionKind::BaseSpecifier:
   case ReflectionKind::Annotation:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     ID.AddPointer(V.getOpaqueReflectionData());
     return;
   case ReflectionKind::Attribute: {
@@ -1013,6 +1014,13 @@ Expr *APValue::getReflectedExpression() const {
           const_cast<void *>(getOpaqueReflectionData()));
 }
 
+ReturnStmt *APValue::getReflectedReturnStatement() const {
+  assert(getReflectionKind() == ReflectionKind::ReturnStatement &&
+         "not a reflection of a return statement");
+  return reinterpret_cast<ReturnStmt *>(
+          const_cast<void *>(getOpaqueReflectionData()));
+}
+
 static double GetApproxValue(const llvm::APFloat &F) {
   llvm::APFloat V = F;
   bool ignored;
@@ -1381,6 +1389,9 @@ void APValue::printPretty(raw_ostream &Out, const PrintingPolicy &Policy,
     case ReflectionKind::Expression:
       Repr = "expression";
       break;
+    case ReflectionKind::ReturnStatement:
+      Repr = "return-statement";
+      break;
     }
     Out << "^^(" << Repr << ")";
     return;
@@ -1722,6 +1733,7 @@ void APValue::setReflection(ReflectionKind RK, const void *Ptr) {
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     SelfData.Kind = RK;
     SelfData.Data = Ptr;
     return;

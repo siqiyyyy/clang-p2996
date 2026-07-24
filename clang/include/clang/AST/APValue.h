@@ -42,6 +42,7 @@ template <typename T> class BasicReaderBase;
   class NamespaceDecl;
   class ParsedAttr;
   class ParmVarDecl;
+  class ReturnStmt;
   struct PrintingPolicy;
   class Type;
   class UsingShadowDecl;
@@ -593,6 +594,11 @@ public:
     return isReflection() && getReflectionKind() == ReflectionKind::Expression;
   }
 
+  bool isReflectedReturnStatement() const {
+    return isReflection() &&
+           getReflectionKind() == ReflectionKind::ReturnStatement;
+  }
+
   void dump() const;
   void dump(raw_ostream &OS, const ASTContext &Context) const;
 
@@ -787,6 +793,7 @@ public:
   CXX26AnnotationAttr *getReflectedAnnotation() const;
   ParsedAttr *getReflectedAttribute() const;
   Expr *getReflectedExpression() const;
+  ReturnStmt *getReflectedReturnStatement() const;
 
   void setInt(APSInt I) {
     assert(isInt() && "Invalid accessor");

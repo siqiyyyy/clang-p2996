@@ -9099,6 +9099,7 @@ TreeTransform<Derived>::TransformCXXReflectExpr(CXXReflectExpr *E) {
   case ReflectionKind::Value:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return E;
   case ReflectionKind::Null:
   case ReflectionKind::BaseSpecifier:

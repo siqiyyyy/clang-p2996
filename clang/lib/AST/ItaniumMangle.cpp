@@ -5072,6 +5072,14 @@ void CXXNameMangler::mangleReflection(const APValue &R) {
     mangleExpression(R.getReflectedExpression());
     break;
   }
+  case ReflectionKind::ReturnStatement: {
+    // No dedicated production for statement reflections; mangle the returned
+    // expression (if any) so distinct return values remain distinguishable.
+    Out << 'x';
+    if (Expr *RetVal = R.getReflectedReturnStatement()->getRetValue())
+      mangleExpression(RetVal);
+    break;
+  }
   }
   Out << 'E';
 }

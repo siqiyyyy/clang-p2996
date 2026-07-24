@@ -822,6 +822,19 @@ static bool expression_declaration_of(APValue &Result, ASTContext &C,
                                       ArrayRef<Expr *> Args,
                                       Decl *ContainingDecl);
 
+// Return-statement reflection metafunctions
+static bool is_return_statement(APValue &Result, ASTContext &C,
+                                MetaActions &Meta, EvalFn Evaluator,
+                                DiagFn Diagnoser, bool AllowInjection,
+                                QualType ResultTy, SourceRange Range,
+                                ArrayRef<Expr *> Args, Decl *ContainingDecl);
+static bool return_value_of(APValue &Result, ASTContext &C,
+                            MetaActions &Meta, EvalFn Evaluator,
+                            DiagFn Diagnoser, bool AllowInjection,
+                            QualType ResultTy, SourceRange Range,
+                            ArrayRef<Expr *> Args,
+                            Decl *ContainingDecl);
+
 // -----------------------------------------------------------------------------
 // Metafunction table
 //
@@ -977,6 +990,10 @@ static constexpr Metafunction Metafunctions[] = {
   { Metafunction::MFRK_metaInfo, 2, 2, get_next_operand_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_callee_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_declaration_of },
+
+  // Return-statement reflection metafunctions
+  { Metafunction::MFRK_bool, 1, 1, is_return_statement },
+  { Metafunction::MFRK_metaInfo, 1, 1, return_value_of },
 };
 constexpr const unsigned NumMetafunctions = sizeof(Metafunctions) /
                                             sizeof(Metafunction);
@@ -1818,6 +1835,9 @@ StringRef DescriptionOf(APValue RV, bool Granular = true) {
   case ReflectionKind::Expression: {
     return "an expression";
   }
+  case ReflectionKind::ReturnStatement: {
+    return "a return statement";
+  }
   }
 }
 
@@ -2214,6 +2234,7 @@ bool get_begin_enumerator_decl_of(APValue &Result, ASTContext &C,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation: {
     return DiagnoseReflectionKind(Diagnoser, Range, "an enum type",
                                   DescriptionOf(RV));
@@ -2259,6 +2280,7 @@ bool get_next_enumerator_decl_of(APValue &Result, ASTContext &C,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation: {
     llvm_unreachable("should have failed in 'get_begin_enumerator_decl_of'");
   }
@@ -2325,6 +2347,7 @@ bool get_ith_base_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return DiagnoseReflectionKind(Diagnoser, Range, "a class type",
                                   DescriptionOf(RV));
   }
@@ -2389,6 +2412,7 @@ bool get_ith_template_argument_of(APValue &Result, ASTContext &C,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return DiagnoseReflectionKind(Diagnoser, Range, "a template specialization",
                                   DescriptionOf(RV));
   }
@@ -2483,6 +2507,7 @@ bool get_begin_member_decl_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return true;
   }
   llvm_unreachable("unknown reflection kind");
@@ -2700,6 +2725,7 @@ bool identifier_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Value:
   case ReflectionKind::Annotation:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_have_name)
         << DescriptionOf(RV) << Range;
   case ReflectionKind::EntityProxy:
@@ -2798,6 +2824,7 @@ bool has_identifier(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Value:
   case ReflectionKind::Annotation:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     break;
   case ReflectionKind::EntityProxy:
     llvm_unreachable("proxies should already have been unwrapped");
@@ -2899,6 +2926,7 @@ bool source_location_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                         RV.getReflectedAnnotation());
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return findAttrLoc(Result, C, Evaluator, ResultTy,
                         RV.getReflectedAttribute());
   case ReflectionKind::Object:
@@ -2925,6 +2953,7 @@ bool type_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Type:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Template:
   case ReflectionKind::Namespace:
   case ReflectionKind::EntityProxy:
@@ -3007,6 +3036,7 @@ bool parent_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     if (Diagnoser)
       return Diagnoser(Range.getBegin(), diag::metafn_no_associated_property)
           << DescriptionOf(RV) << 1 << Range;
@@ -3077,6 +3107,7 @@ bool underlying_entity_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, RV);
   case ReflectionKind::Type: {
     QualType QT = RV.getReflectedType();
@@ -3121,6 +3152,7 @@ bool proxied_entity_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return DiagnoseReflectionKind(Diagnoser, Range, "an entity proxy");
   case ReflectionKind::EntityProxy:
     return SetAndSucceed(Result, MaybeUnproxy(C, RV, false));
@@ -3179,6 +3211,7 @@ bool object_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
         << 1 << DescriptionOf(RV) << Range;
   }
@@ -3292,6 +3325,7 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   }
   case ReflectionKind::Attribute: // TODO P3385 anything to do ?
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Null:
   case ReflectionKind::Type:
   case ReflectionKind::Template:
@@ -3346,6 +3380,7 @@ bool template_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return DiagnoseReflectionKind(Diagnoser, Range, "a template specialization",
                                   DescriptionOf(RV));
     return true;
@@ -3372,6 +3407,7 @@ static bool CanActAsTemplateArg(const APValue &RV) {
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Null:
     return false;
   case ReflectionKind::EntityProxy:
@@ -3832,6 +3868,7 @@ bool extract(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::EntityProxy:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Parameter:
   case ReflectionKind::BaseSpecifier:
   case ReflectionKind::DataMemberSpec:
@@ -3890,6 +3927,7 @@ bool is_ACCESS(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Namespace:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, false));
   }
   llvm_unreachable("invalid reflection type");
@@ -3987,6 +4025,7 @@ bool is_virtual(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, IsVirtual));
   }
   llvm_unreachable("invalid reflection type");
@@ -4204,6 +4243,7 @@ bool is_const(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, false));
   case ReflectionKind::Type: {
     bool result = isConstQualifiedType(RV.getReflectedType());
@@ -4243,6 +4283,7 @@ bool is_volatile(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return SetAndSucceed(Result, makeBool(C, false));
   case ReflectionKind::Type: {
@@ -4631,6 +4672,7 @@ bool is_static_member(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, result));
   case ReflectionKind::EntityProxy:
     llvm_unreachable("proxies should already have been unwrapped");
@@ -4779,6 +4821,7 @@ bool is_alias(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::EntityProxy:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, false));
   }
   llvm_unreachable("unknown reflection kind");
@@ -4859,6 +4902,7 @@ bool has_complete_definition(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     break;
   case ReflectionKind::EntityProxy:
     llvm_unreachable("proxies should already have been unwrapped");
@@ -4901,6 +4945,7 @@ bool is_enumerable_type(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     break;
   case ReflectionKind::EntityProxy:
     llvm_unreachable("proxies should already have been unwrapped");
@@ -5199,6 +5244,7 @@ bool has_template_arguments(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, false));
   }
   llvm_unreachable("unknown reflection kind");
@@ -5308,6 +5354,7 @@ bool is_constructor(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return SetAndSucceed(Result, makeBool(C, false));
   case ReflectionKind::Declaration: {
@@ -5460,6 +5507,7 @@ bool is_destructor(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return SetAndSucceed(Result, makeBool(C, false));
   case ReflectionKind::Declaration: {
@@ -5495,6 +5543,7 @@ bool is_special_member_function(APValue &Result, ASTContext &C,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return SetAndSucceed(Result, makeBool(C, false));
   case ReflectionKind::Declaration: {
@@ -6059,6 +6108,7 @@ bool offset_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return DiagnoseReflectionKind(Diagnoser, Range, "a non-static data member",
                                   DescriptionOf(RV));
@@ -6134,6 +6184,7 @@ bool size_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Parameter:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
         << 3 << DescriptionOf(RV);
@@ -6163,6 +6214,7 @@ bool bit_offset_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return DiagnoseReflectionKind(Diagnoser, Range, "a non-static data member",
                                   DescriptionOf(RV));
@@ -6236,6 +6288,7 @@ bool bit_size_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Parameter:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
   case ReflectionKind::Annotation:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
         << 3 << DescriptionOf(RV);
@@ -6304,6 +6357,7 @@ bool alignment_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
         << 4 << DescriptionOf(RV) << Range;
   }
@@ -6367,6 +6421,7 @@ bool get_ith_parameter_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return true;
   }
   return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
@@ -6398,6 +6453,7 @@ bool has_ellipsis_parameter(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
       << 5 << DescriptionOf(RV) << Range;
   case ReflectionKind::Type:
@@ -6449,6 +6505,7 @@ bool has_default_argument(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return DiagnoseReflectionKind(Diagnoser, Range, "a function parameter",
                                   DescriptionOf(RV));
   }
@@ -6532,6 +6589,7 @@ bool return_type_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
         << 6 << DescriptionOf(RV) << Range;
   }
@@ -6640,6 +6698,7 @@ bool get_ith_annotation_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
         << 7 << DescriptionOf(RV) << Range;
   }
@@ -6716,6 +6775,7 @@ bool annotate(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::EntityProxy:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_annotate)
         << DescriptionOf(Appertainee) << Range;
   }
@@ -6893,6 +6953,7 @@ bool is_accessible(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, false));
   }
   llvm_unreachable("invalid reflection type");
@@ -6959,6 +7020,7 @@ bool is_access_specified(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return SetAndSucceed(Result, makeBool(C, false));
   }
   llvm_unreachable("invalid reflection type");
@@ -7138,6 +7200,7 @@ bool reflect_invoke(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Attribute:
   case ReflectionKind::Expression:
+  case ReflectionKind::ReturnStatement:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_invoke)
         << DescriptionOf(FnRefl) << Range;
   case ReflectionKind::Object: {
@@ -7616,6 +7679,40 @@ bool expression_declaration_of(APValue &Result, ASTContext &C,
 
   APValue DeclRV(ReflectionKind::Declaration, DRE->getDecl());
   return SetAndSucceed(Result, DeclRV);
+}
+
+bool is_return_statement(APValue &Result, ASTContext &C, MetaActions &Meta,
+                         EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  return SetAndSucceed(Result, makeBool(C, RV.isReflectedReturnStatement()));
+}
+
+bool return_value_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                     EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                     QualType ResultTy, SourceRange Range,
+                     ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedReturnStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "return statement",
+                                 DescriptionOf(RV));
+
+  ReturnStmt *S = RV.getReflectedReturnStatement();
+
+  // A bare 'return;' has no operand — yield a null reflection.
+  Expr *RetVal = S->getRetValue();
+  if (!RetVal)
+    return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+
+  APValue ExprRV(ReflectionKind::Expression, RetVal);
+  return SetAndSucceed(Result, ExprRV);
 }
 
 }  // end namespace clang
