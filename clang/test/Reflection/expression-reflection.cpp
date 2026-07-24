@@ -45,15 +45,31 @@ namespace test_declaration_of {
   static_assert(declaration_of(^^{ x }) != ^^y);
 }
 
-// operands_of: get children of binary_op
+// operands_of: get children of binary_op.
+//
+// Two things to note:
+//  1. operands_of returns a std::vector, which cannot be stored in a constexpr
+//     variable (non-transient constexpr allocation is ill-formed). Call it
+//     inline so the vector stays transient within each constant expression.
+//  2. The captured AST includes implicit conversions: the operands of `a + b`
+//     are lvalue-to-rvalue ImplicitCastExpr nodes wrapping the decl_refs, so
+//     the operand kind is `cast`. Strip the cast (first_operand_of) to reach
+//     the underlying decl_ref, as real pattern-matching code must.
 namespace test_operands {
   int a = 1, b = 2;
-  constexpr auto ops = operands_of(^^{ a + b });
-  static_assert(ops.size() == 2);
-  static_assert(expression_kind_of(ops[0]) == expr_kind::decl_ref);
-  static_assert(expression_kind_of(ops[1]) == expr_kind::decl_ref);
-  static_assert(declaration_of(ops[0]) == ^^a);
-  static_assert(declaration_of(ops[1]) == ^^b);
+  static_assert(operands_of(^^{ a + b }).size() == 2);
+  static_assert(expression_kind_of(operands_of(^^{ a + b })[0]) ==
+                expr_kind::cast);
+  static_assert(expression_kind_of(
+                    first_operand_of(operands_of(^^{ a + b })[0])) ==
+                expr_kind::decl_ref);
+  static_assert(expression_kind_of(
+                    first_operand_of(operands_of(^^{ a + b })[1])) ==
+                expr_kind::decl_ref);
+  static_assert(declaration_of(
+                    first_operand_of(operands_of(^^{ a + b })[0])) == ^^a);
+  static_assert(declaration_of(
+                    first_operand_of(operands_of(^^{ a + b })[1])) == ^^b);
 }
 
 // Splice: [:^^{ expr }:] evaluates the expression

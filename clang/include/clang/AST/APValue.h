@@ -38,6 +38,7 @@ template <typename T> class BasicReaderBase;
   class Decl;
   class DiagnosticBuilder;
   class Expr;
+  class Stmt;
   class FieldDecl;
   class NamespaceDecl;
   class ParsedAttr;
@@ -593,6 +594,10 @@ public:
     return isReflection() && getReflectionKind() == ReflectionKind::Expression;
   }
 
+  bool isReflectedStatement() const {
+    return isReflection() && getReflectionKind() == ReflectionKind::Statement;
+  }
+
   void dump() const;
   void dump(raw_ostream &OS, const ASTContext &Context) const;
 
@@ -787,6 +792,7 @@ public:
   CXX26AnnotationAttr *getReflectedAnnotation() const;
   ParsedAttr *getReflectedAttribute() const;
   Expr *getReflectedExpression() const;
+  Stmt *getReflectedStatement() const;
 
   void setInt(APSInt I) {
     assert(isInt() && "Invalid accessor");

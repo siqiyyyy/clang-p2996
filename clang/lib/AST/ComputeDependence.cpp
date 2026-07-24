@@ -1024,6 +1024,10 @@ ExprDependence clang::computeDependence(CXXReflectExpr *E,
       ED |= ExprDependence::UnexpandedPack;
     return ED;
   }
+  case ReflectionKind::Statement:
+    // Statement reflections are produced by metafunctions (e.g. body_of) from
+    // already-instantiated declarations, so they carry no added dependence.
+    return ExprDependence::None;
   case ReflectionKind::EntityProxy:
     llvm_unreachable("should already have been unwrapped");
   }

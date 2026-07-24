@@ -2213,6 +2213,17 @@ void MicrosoftCXXNameMangler::mangleReflection(const APValue &R) {
   case ReflectionKind::Annotation:
   case ReflectionKind::Expression:
     llvm_unreachable("unimplemented");
+  case ReflectionKind::Statement: {
+    // Statement reflections have no structural mangling and cannot be template
+    // arguments; reject explicitly rather than ICE. (The other kinds above are
+    // pre-existing unimplemented cases in this branch's MS mangler.)
+    DiagnosticsEngine &Diags = Context.getDiags();
+    unsigned DiagID = Diags.getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "a reflection of a statement cannot be used as a template argument");
+    Diags.Report(DiagID);
+    break;
+  }
   }
   Out << 'E';
 }

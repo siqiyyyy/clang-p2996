@@ -3069,6 +3069,7 @@ DEF_TRAVERSE_STMT(CXXReflectExpr, {
     case ReflectionKind::DataMemberSpec:
     case ReflectionKind::Attribute:
     case ReflectionKind::Expression:
+    case ReflectionKind::Statement:
       break;
     }
   }

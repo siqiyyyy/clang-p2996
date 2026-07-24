@@ -593,6 +593,17 @@ enum : unsigned {
   __metafn_get_next_operand_of,
   __metafn_expression_callee_of,
   __metafn_expression_declaration_of,
+
+  // Statement / function-body reflection metafunctions
+  __metafn_body_of,
+  __metafn_is_statement,
+  __metafn_statement_kind_of,
+  __metafn_get_begin_statement_of,
+  __metafn_get_next_statement_of,
+  __metafn_return_value_of,
+  __metafn_declared_variable_of,
+  __metafn_initializer_of,
+  __metafn_expression_of,
 };
 
 consteval auto __workaround_expand_compiler_builtins(info type) -> info;
@@ -2365,6 +2376,81 @@ consteval info first_operand_of(info r) {
 
 consteval info next_operand_of(info parent, info current) {
   return __metafunction(detail::__metafn_get_next_operand_of, parent, current);
+}
+
+
+// Declaration accessor: the initializer expression of a reflected variable.
+// (Operates on a variable declaration, not a statement.)
+consteval info initializer_of(info r) {
+  return __metafunction(detail::__metafn_initializer_of, r);
+}
+
+
+// =============================================================================
+// Statement / function-body reflection API
+// =============================================================================
+
+enum class stmt_kind : size_t {
+  compound = 0,
+  decl = 1,
+  return_ = 2,
+  expression = 3,
+  if_ = 4,
+  for_ = 5,
+  while_ = 6,
+  other = 7,
+};
+
+// Reflect the body (a compound statement) of a reflected function.
+consteval info body_of(info fn) {
+  return __metafunction(detail::__metafn_body_of, fn);
+}
+
+consteval bool is_statement(info r) {
+  return __metafunction(detail::__metafn_is_statement, r);
+}
+
+consteval stmt_kind statement_kind_of(info r) {
+  return static_cast<stmt_kind>(
+      __metafunction(detail::__metafn_statement_kind_of, r));
+}
+
+// Child statements of a compound (or any) statement. Every child comes back as
+// a statement reflection -- including expression-statements (a bare expression
+// in statement position), which report statement_kind::expression. Use
+// expression_of() to obtain the underlying expression reflection when needed.
+consteval auto statements_of(info r) -> vector<info> {
+  vector<info> result;
+  info child = __metafunction(detail::__metafn_get_begin_statement_of, r);
+  while (is_statement(child)) {
+    result.push_back(child);
+    child = __metafunction(detail::__metafn_get_next_statement_of, r, child);
+  }
+  return result;
+}
+
+consteval info first_statement_of(info r) {
+  return __metafunction(detail::__metafn_get_begin_statement_of, r);
+}
+
+consteval info next_statement_of(info parent, info current) {
+  return __metafunction(detail::__metafn_get_next_statement_of, parent, current);
+}
+
+// The returned expression of a return statement.
+consteval info return_value_of(info r) {
+  return __metafunction(detail::__metafn_return_value_of, r);
+}
+
+// The variable declared by a single-variable declaration statement.
+consteval info declared_variable_of(info r) {
+  return __metafunction(detail::__metafn_declared_variable_of, r);
+}
+
+// Bridge an expression-statement to its underlying expression reflection
+// (valid when statement_kind_of(r) == stmt_kind::expression).
+consteval info expression_of(info r) {
+  return __metafunction(detail::__metafn_expression_of, r);
 }
 
 

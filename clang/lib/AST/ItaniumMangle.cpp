@@ -5072,6 +5072,19 @@ void CXXNameMangler::mangleReflection(const APValue &R) {
     mangleExpression(R.getReflectedExpression());
     break;
   }
+  case ReflectionKind::Statement: {
+    // Statement reflections (function bodies etc.) are produced by metafunctions
+    // and consumed at consteval time; they have no structural mangling, so they
+    // cannot appear as template arguments. Reject explicitly rather than emit a
+    // non-unique tag (which would silently collide / violate ODR). To use the
+    // expression inside an expression-statement, call std::meta::expression_of.
+    DiagnosticsEngine &Diags = Context.getDiags();
+    unsigned DiagID = Diags.getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "a reflection of a statement cannot be used as a template argument");
+    Diags.Report(DiagID);
+    break;
+  }
   }
   Out << 'E';
 }
