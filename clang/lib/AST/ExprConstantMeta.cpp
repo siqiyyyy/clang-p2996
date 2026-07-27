@@ -22,6 +22,7 @@
 #include "clang/AST/DeclGroup.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/Metafunction.h"
 #include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/RecordLayout.h"
@@ -7432,6 +7433,25 @@ bool reflect_invoke(APValue &Result, ASTContext &C, MetaActions &Meta,
 // Expression reflection metafunction implementations
 // =============================================================================
 
+// See through compiler-inserted "transparent" wrapper nodes (full-expression
+// cleanups, temporary materialization/binding, constant wrappers) so that
+// expression reflection classifies and navigates the semantically-meaningful
+// expression. These wrappers appear around class-typed subexpressions (e.g.
+// `T v = f(a, b);` where T has a non-trivial destructor) and would otherwise
+// make an ordinary call reflect as an unclassified node. Implicit casts are
+// deliberately NOT stripped here — they are surfaced as `cast` and peeled by
+// library code that wants to.
+static Expr *PeelTransparent(Expr *E) {
+  while (E) {
+    if (auto *X = dyn_cast<ExprWithCleanups>(E))            E = X->getSubExpr();
+    else if (auto *X = dyn_cast<MaterializeTemporaryExpr>(E)) E = X->getSubExpr();
+    else if (auto *X = dyn_cast<CXXBindTemporaryExpr>(E))   E = X->getSubExpr();
+    else if (auto *X = dyn_cast<ConstantExpr>(E))           E = X->getSubExpr();
+    else break;
+  }
+  return E;
+}
+
 bool is_expression(APValue &Result, ASTContext &C, MetaActions &Meta,
                    EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
                    QualType ResultTy, SourceRange Range,
@@ -7456,7 +7476,7 @@ bool expression_kind_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     return DiagnoseReflectionKind(Diagnoser, Range, "expression",
                                  DescriptionOf(RV));
 
-  Expr *E = RV.getReflectedExpression();
+  Expr *E = PeelTransparent(RV.getReflectedExpression());
 
   // expr_kind values: literal=0, decl_ref=1, binary_op=2, unary_op=3,
   // call=4, member_access=5, conditional=6, cast=7, construct=8,
@@ -7536,7 +7556,7 @@ bool expression_operator_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     return DiagnoseReflectionKind(Diagnoser, Range, "expression",
                                  DescriptionOf(RV));
 
-  Expr *E = RV.getReflectedExpression();
+  Expr *E = PeelTransparent(RV.getReflectedExpression());
 
   // Map BinaryOperator/UnaryOperator opcodes to the P2996 operators enum.
   // Uses the same OperatorIndices table as operator_of — index in table = enum value.
@@ -7627,7 +7647,7 @@ bool get_begin_operand_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     return DiagnoseReflectionKind(Diagnoser, Range, "expression",
                                  DescriptionOf(RV));
 
-  Expr *E = RV.getReflectedExpression();
+  Expr *E = PeelTransparent(RV.getReflectedExpression());
 
   // Return the first child expression, or a null reflection if none.
   for (auto *Child : E->children()) {
@@ -7656,7 +7676,7 @@ bool get_next_operand_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     return DiagnoseReflectionKind(Diagnoser, Range, "expression",
                                  DescriptionOf(ParentRV));
 
-  Expr *Parent = ParentRV.getReflectedExpression();
+  Expr *Parent = PeelTransparent(ParentRV.getReflectedExpression());
   Expr *Current = CurrentRV.isReflectedExpression()
                       ? CurrentRV.getReflectedExpression()
                       : nullptr;
@@ -7691,7 +7711,7 @@ bool expression_callee_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     return DiagnoseReflectionKind(Diagnoser, Range, "expression",
                                  DescriptionOf(RV));
 
-  Expr *E = RV.getReflectedExpression();
+  Expr *E = PeelTransparent(RV.getReflectedExpression());
   auto *CE = dyn_cast<CallExpr>(E);
   if (!CE) {
     Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
@@ -7721,7 +7741,7 @@ bool expression_declaration_of(APValue &Result, ASTContext &C,
     return DiagnoseReflectionKind(Diagnoser, Range, "expression",
                                  DescriptionOf(RV));
 
-  Expr *E = RV.getReflectedExpression();
+  Expr *E = PeelTransparent(RV.getReflectedExpression());
   auto *DRE = dyn_cast<DeclRefExpr>(E);
   if (!DRE) {
     Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
