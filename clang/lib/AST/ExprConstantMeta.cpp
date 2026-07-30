@@ -151,6 +151,9 @@ static bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                         QualType ResultTy, SourceRange Range,
                         ArrayRef<Expr *> Args, Decl *ContainingDecl);
 
+// Defined later; see through transparent wrapper nodes of a reflected expr.
+static Expr *PeelTransparent(Expr *E);
+
 static bool object_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                       EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
                       QualType ResultTy, SourceRange Range,
@@ -3376,9 +3379,27 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     }
     return SetAndSucceed(Result, Constant.Lift(ConstantTy));
   }
+  case ReflectionKind::Expression: {
+    // Reduce a constant expression (e.g. a literal) to a value reflection, so
+    // it can be spliced by the existing P2996 value splice. Uses the provided
+    // Evaluator (as the VarDecl case does) to evaluate in the proper context.
+    Expr *E = PeelTransparent(RV.getReflectedExpression());
+
+    APValue Constant;
+    if (!Evaluator(Constant, E, /*loadLValue=*/true))
+      return true;
+
+    QualType ConstantTy = ComputeResultType(E->getType(), Constant);
+    if (ConstantTy->isRecordType()) {
+      auto *TPO = C.getTemplateParamObjectDecl(ConstantTy, Constant);
+      Constant = APValue(APValue::LValueBase{TPO}, CharUnits::Zero(), {}, false,
+                    false);
+      ConstantTy = QualType{};
+    }
+    return SetAndSucceed(Result, Constant.Lift(ConstantTy));
+  }
   case ReflectionKind::Attribute: // TODO P3385 anything to do ?
   case ReflectionKind::Statement:
-  case ReflectionKind::Expression:
   case ReflectionKind::Null:
   case ReflectionKind::Type:
   case ReflectionKind::Template:

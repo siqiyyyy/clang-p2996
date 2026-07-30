@@ -2325,27 +2325,46 @@ consteval auto reflect_invoke(info target, R1 &&targs, R2 &&args) -> info {
 // Expression reflection API
 // =============================================================================
 
-enum class expr_kind : size_t {
-  literal = 0,
-  decl_ref = 1,
-  binary_op = 2,
-  unary_op = 3,
-  call = 4,
-  member_access = 5,
-  conditional = 6,
-  cast = 7,
-  construct = 8,
-  subscript = 9,
-  comma = 10,
-};
-
 consteval bool is_expression(info r) {
   return __metafunction(detail::__metafn_is_expression, r);
 }
 
-consteval expr_kind expression_kind_of(info r) {
-  return static_cast<expr_kind>(
-      __metafunction(detail::__metafn_expression_kind_of, r));
+// Expression classification predicates, in P2996's own `is_*` idiom (internally
+// they read a private kind code). Categories may overlap: an overloaded
+// `a + b` is both a call and a binary operator.
+consteval bool is_literal(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 0;
+}
+
+consteval bool is_variable_reference(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 1;
+}
+
+consteval bool is_binary_operator(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 2;
+}
+
+consteval bool is_unary_operator(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 3;
+}
+
+consteval bool is_function_call(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 4;
+}
+
+consteval bool is_cast(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 7;
+}
+
+consteval bool is_construct(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 8;
 }
 
 consteval auto operands_of(info r) -> vector<info> {
@@ -2370,14 +2389,6 @@ consteval operators expression_operator_of(info r) {
   return operators(__metafunction(detail::__metafn_expression_operator_of, r));
 }
 
-consteval info first_operand_of(info r) {
-  return __metafunction(detail::__metafn_get_begin_operand_of, r);
-}
-
-consteval info next_operand_of(info parent, info current) {
-  return __metafunction(detail::__metafn_get_next_operand_of, parent, current);
-}
-
 
 // Declaration accessor: the initializer expression of a reflected variable.
 // (Operates on a variable declaration, not a statement.)
@@ -2390,17 +2401,6 @@ consteval info initializer_of(info r) {
 // Statement / function-body reflection API
 // =============================================================================
 
-enum class stmt_kind : size_t {
-  compound = 0,
-  decl = 1,
-  return_ = 2,
-  expression = 3,
-  if_ = 4,
-  for_ = 5,
-  while_ = 6,
-  other = 7,
-};
-
 // Reflect the body (a compound statement) of a reflected function.
 consteval info body_of(info fn) {
   return __metafunction(detail::__metafn_body_of, fn);
@@ -2410,15 +2410,28 @@ consteval bool is_statement(info r) {
   return __metafunction(detail::__metafn_is_statement, r);
 }
 
-consteval stmt_kind statement_kind_of(info r) {
-  return static_cast<stmt_kind>(
-      __metafunction(detail::__metafn_statement_kind_of, r));
+// Statement classification predicates (internally read a private kind code).
+consteval bool is_compound_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 0;
 }
 
-// Child statements of a compound (or any) statement. Every child comes back as
-// a statement reflection -- including expression-statements (a bare expression
-// in statement position), which report statement_kind::expression. Use
-// expression_of() to obtain the underlying expression reflection when needed.
+consteval bool is_declaration_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 1;
+}
+
+consteval bool is_return_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 2;
+}
+
+consteval bool is_expression_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 3;
+}
+
+// Child statements of a compound (or any) statement.
 consteval auto statements_of(info r) -> vector<info> {
   vector<info> result;
   info child = __metafunction(detail::__metafn_get_begin_statement_of, r);
@@ -2429,14 +2442,6 @@ consteval auto statements_of(info r) -> vector<info> {
   return result;
 }
 
-consteval info first_statement_of(info r) {
-  return __metafunction(detail::__metafn_get_begin_statement_of, r);
-}
-
-consteval info next_statement_of(info parent, info current) {
-  return __metafunction(detail::__metafn_get_next_statement_of, parent, current);
-}
-
 // The returned expression of a return statement.
 consteval info return_value_of(info r) {
   return __metafunction(detail::__metafn_return_value_of, r);
@@ -2445,12 +2450,6 @@ consteval info return_value_of(info r) {
 // The variable declared by a single-variable declaration statement.
 consteval info declared_variable_of(info r) {
   return __metafunction(detail::__metafn_declared_variable_of, r);
-}
-
-// Bridge an expression-statement to its underlying expression reflection
-// (valid when statement_kind_of(r) == stmt_kind::expression).
-consteval info expression_of(info r) {
-  return __metafunction(detail::__metafn_expression_of, r);
 }
 
 
