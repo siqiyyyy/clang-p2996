@@ -7593,56 +7593,13 @@ bool expression_operator_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     OO_Comma,
   };
 
+  // clang already knows the operator each opcode spells; use that instead of a
+  // hand-maintained opcode table.
   OverloadedOperatorKind OO = OO_None;
-  if (auto *BO = dyn_cast<BinaryOperator>(E)) {
-    switch (BO->getOpcode()) {
-    case BO_Add: OO = OO_Plus; break;
-    case BO_Sub: OO = OO_Minus; break;
-    case BO_Mul: OO = OO_Star; break;
-    case BO_Div: OO = OO_Slash; break;
-    case BO_Rem: OO = OO_Percent; break;
-    case BO_And: OO = OO_Amp; break;
-    case BO_Or:  OO = OO_Pipe; break;
-    case BO_Xor: OO = OO_Caret; break;
-    case BO_Shl: OO = OO_LessLess; break;
-    case BO_Shr: OO = OO_GreaterGreater; break;
-    case BO_EQ:  OO = OO_EqualEqual; break;
-    case BO_NE:  OO = OO_ExclaimEqual; break;
-    case BO_LT:  OO = OO_Less; break;
-    case BO_GT:  OO = OO_Greater; break;
-    case BO_LE:  OO = OO_LessEqual; break;
-    case BO_GE:  OO = OO_GreaterEqual; break;
-    case BO_LAnd: OO = OO_AmpAmp; break;
-    case BO_LOr:  OO = OO_PipePipe; break;
-    case BO_Assign: OO = OO_Equal; break;
-    case BO_Comma: OO = OO_Comma; break;
-    case BO_AddAssign: OO = OO_PlusEqual; break;
-    case BO_SubAssign: OO = OO_MinusEqual; break;
-    case BO_MulAssign: OO = OO_StarEqual; break;
-    case BO_DivAssign: OO = OO_SlashEqual; break;
-    case BO_RemAssign: OO = OO_PercentEqual; break;
-    case BO_AndAssign: OO = OO_AmpEqual; break;
-    case BO_OrAssign:  OO = OO_PipeEqual; break;
-    case BO_XorAssign: OO = OO_CaretEqual; break;
-    case BO_ShlAssign: OO = OO_LessLessEqual; break;
-    case BO_ShrAssign: OO = OO_GreaterGreaterEqual; break;
-    default: break;
-    }
-  } else if (auto *UO = dyn_cast<UnaryOperator>(E)) {
-    switch (UO->getOpcode()) {
-    case UO_Minus:   OO = OO_Minus; break;
-    case UO_Plus:    OO = OO_Plus; break;
-    case UO_Not:     OO = OO_Tilde; break;
-    case UO_LNot:    OO = OO_Exclaim; break;
-    case UO_PreInc:  OO = OO_PlusPlus; break;
-    case UO_PreDec:  OO = OO_MinusMinus; break;
-    case UO_PostInc: OO = OO_PlusPlus; break;
-    case UO_PostDec: OO = OO_MinusMinus; break;
-    case UO_Deref:   OO = OO_Star; break;
-    case UO_AddrOf:  OO = OO_Amp; break;
-    default: break;
-    }
-  }
+  if (auto *BO = dyn_cast<BinaryOperator>(E))
+    OO = BinaryOperator::getOverloadedOperator(BO->getOpcode());
+  else if (auto *UO = dyn_cast<UnaryOperator>(E))
+    OO = UnaryOperator::getOverloadedOperator(UO->getOpcode());
 
   size_t OpVal = 0;
   if (OO != OO_None) {
