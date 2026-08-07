@@ -7468,6 +7468,7 @@ static Expr *PeelTransparent(Expr *E) {
     else if (auto *X = dyn_cast<MaterializeTemporaryExpr>(E)) E = X->getSubExpr();
     else if (auto *X = dyn_cast<CXXBindTemporaryExpr>(E))   E = X->getSubExpr();
     else if (auto *X = dyn_cast<ConstantExpr>(E))           E = X->getSubExpr();
+    else if (auto *X = dyn_cast<ParenExpr>(E))              E = X->getSubExpr();
     else break;
   }
   return E;
