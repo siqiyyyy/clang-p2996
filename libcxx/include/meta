@@ -593,6 +593,9 @@ enum : unsigned {
   __metafn_get_next_operand_of,
   __metafn_expression_callee_of,
   __metafn_expression_declaration_of,
+  __metafn_condition_of,
+  __metafn_true_expression_of,
+  __metafn_false_expression_of,
 
   // Statement / function-body reflection metafunctions
   __metafn_body_of,
@@ -2357,6 +2360,12 @@ consteval bool is_function_call(info r) {
          __metafunction(detail::__metafn_expression_kind_of, r) == 4;
 }
 
+// A conditional (ternary) expression `c ? a : b`, or the GNU `c ?: b` form.
+consteval bool is_conditional_operator(info r) {
+  return is_expression(r) &&
+         __metafunction(detail::__metafn_expression_kind_of, r) == 6;
+}
+
 consteval bool is_cast(info r) {
   return is_expression(r) &&
          __metafunction(detail::__metafn_expression_kind_of, r) == 7;
@@ -2387,6 +2396,22 @@ consteval info declaration_of(info r) {
 
 consteval operators expression_operator_of(info r) {
   return operators(__metafunction(detail::__metafn_expression_operator_of, r));
+}
+
+// Conditional (ternary) operator accessors. `operands_of` also walks a ternary
+// in written order -- condition, true branch, false branch -- but these name
+// the roles explicitly. For the GNU `c ?: b` form, where the condition doubles
+// as the true branch, condition_of and true_expression_of both give `c`.
+consteval info condition_of(info r) {
+  return __metafunction(detail::__metafn_condition_of, r);
+}
+
+consteval info true_expression_of(info r) {
+  return __metafunction(detail::__metafn_true_expression_of, r);
+}
+
+consteval info false_expression_of(info r) {
+  return __metafunction(detail::__metafn_false_expression_of, r);
 }
 
 
