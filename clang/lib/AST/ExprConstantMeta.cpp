@@ -825,6 +825,21 @@ static bool expression_declaration_of(APValue &Result, ASTContext &C,
                                       QualType ResultTy, SourceRange Range,
                                       ArrayRef<Expr *> Args,
                                       Decl *ContainingDecl);
+static bool condition_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                         EvalFn Evaluator, DiagFn Diagnoser,
+                         bool AllowInjection, QualType ResultTy,
+                         SourceRange Range, ArrayRef<Expr *> Args,
+                         Decl *ContainingDecl);
+static bool true_expression_of(APValue &Result, ASTContext &C,
+                               MetaActions &Meta, EvalFn Evaluator,
+                               DiagFn Diagnoser, bool AllowInjection,
+                               QualType ResultTy, SourceRange Range,
+                               ArrayRef<Expr *> Args, Decl *ContainingDecl);
+static bool false_expression_of(APValue &Result, ASTContext &C,
+                                MetaActions &Meta, EvalFn Evaluator,
+                                DiagFn Diagnoser, bool AllowInjection,
+                                QualType ResultTy, SourceRange Range,
+                                ArrayRef<Expr *> Args, Decl *ContainingDecl);
 
 // Statement / function-body reflection metafunctions
 static bool body_of(APValue &Result, ASTContext &C, MetaActions &Meta,
@@ -1025,6 +1040,9 @@ static constexpr Metafunction Metafunctions[] = {
   { Metafunction::MFRK_metaInfo, 2, 2, get_next_operand_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_callee_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_declaration_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, condition_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, true_expression_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, false_expression_of },
 
   // Statement / function-body reflection metafunctions
   { Metafunction::MFRK_metaInfo, 1, 1, body_of },
@@ -7730,6 +7748,107 @@ bool expression_declaration_of(APValue &Result, ASTContext &C,
 
   APValue DeclRV(ReflectionKind::Declaration, DRE->getDecl());
   return SetAndSucceed(Result, DeclRV);
+}
+
+// Retrieve the conditional operator behind a reflected expression: either the
+// ternary `c ? a : b` (ConditionalOperator) or the GNU `c ?: b` extension
+// (BinaryConditionalOperator). Sets `Failed` and diagnoses when the reflection
+// is not a conditional expression.
+static AbstractConditionalOperator *
+getReflectedConditional(APValue &RV, DiagFn Diagnoser, SourceRange Range,
+                        bool &Failed) {
+  Failed = true;
+
+  if (!RV.isReflectedExpression()) {
+    DiagnoseReflectionKind(Diagnoser, Range, "expression", DescriptionOf(RV));
+    return nullptr;
+  }
+
+  Expr *E = PeelTransparent(RV.getReflectedExpression());
+  auto *CO = dyn_cast<AbstractConditionalOperator>(E);
+  if (!CO) {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "a conditional expression" << Range;
+    return nullptr;
+  }
+
+  Failed = false;
+  return CO;
+}
+
+// In the GNU `c ?: b` form the condition and the true-branch are the same
+// written operand, which clang models by evaluating it once into an
+// OpaqueValueExpr referenced from both positions. Report the written operand
+// instead, so navigation never hands back an opaque placeholder.
+static Expr *conditionalCommonOperand(AbstractConditionalOperator *CO) {
+  if (auto *BCO = dyn_cast<BinaryConditionalOperator>(CO))
+    return BCO->getCommon();
+  return nullptr;
+}
+
+// condition_of(^^{ c ? a : b }) -> the condition `c`.
+bool condition_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                  EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                  QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
+                  Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  bool Failed;
+  AbstractConditionalOperator *CO =
+      getReflectedConditional(RV, Diagnoser, Range, Failed);
+  if (Failed)
+    return true;
+
+  Expr *Cond = conditionalCommonOperand(CO);
+  if (!Cond)
+    Cond = CO->getCond();
+
+  return SetAndSucceed(Result, APValue(ReflectionKind::Expression, Cond));
+}
+
+// true_expression_of(^^{ c ? a : b }) -> the branch taken when `c` holds (`a`).
+bool true_expression_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                        EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                        QualType ResultTy, SourceRange Range,
+                        ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  bool Failed;
+  AbstractConditionalOperator *CO =
+      getReflectedConditional(RV, Diagnoser, Range, Failed);
+  if (Failed)
+    return true;
+
+  Expr *True = conditionalCommonOperand(CO);
+  if (!True)
+    True = CO->getTrueExpr();
+
+  return SetAndSucceed(Result, APValue(ReflectionKind::Expression, True));
+}
+
+// false_expression_of(^^{ c ? a : b }) -> the branch taken otherwise (`b`).
+bool false_expression_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                         EvalFn Evaluator, DiagFn Diagnoser,
+                         bool AllowInjection, QualType ResultTy,
+                         SourceRange Range, ArrayRef<Expr *> Args,
+                         Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  bool Failed;
+  AbstractConditionalOperator *CO =
+      getReflectedConditional(RV, Diagnoser, Range, Failed);
+  if (Failed)
+    return true;
+
+  return SetAndSucceed(Result,
+                       APValue(ReflectionKind::Expression,
+                               CO->getFalseExpr()));
 }
 
 // ---------------------------------------------------------------------------
