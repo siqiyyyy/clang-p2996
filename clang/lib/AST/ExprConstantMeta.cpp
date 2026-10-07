@@ -885,6 +885,43 @@ static bool expression_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                           QualType ResultTy, SourceRange Range,
                           ArrayRef<Expr *> Args, Decl *ContainingDecl);
 
+// Control-flow statement reflection metafunctions (if/for/while/range-for)
+static bool init_statement_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                              EvalFn Evaluator, DiagFn Diagnoser,
+                              bool AllowInjection, QualType ResultTy,
+                              SourceRange Range, ArrayRef<Expr *> Args,
+                              Decl *ContainingDecl);
+static bool then_statement_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                              EvalFn Evaluator, DiagFn Diagnoser,
+                              bool AllowInjection, QualType ResultTy,
+                              SourceRange Range, ArrayRef<Expr *> Args,
+                              Decl *ContainingDecl);
+static bool else_statement_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                              EvalFn Evaluator, DiagFn Diagnoser,
+                              bool AllowInjection, QualType ResultTy,
+                              SourceRange Range, ArrayRef<Expr *> Args,
+                              Decl *ContainingDecl);
+static bool increment_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                         EvalFn Evaluator, DiagFn Diagnoser,
+                         bool AllowInjection, QualType ResultTy,
+                         SourceRange Range, ArrayRef<Expr *> Args,
+                         Decl *ContainingDecl);
+static bool loop_body_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                         EvalFn Evaluator, DiagFn Diagnoser,
+                         bool AllowInjection, QualType ResultTy,
+                         SourceRange Range, ArrayRef<Expr *> Args,
+                         Decl *ContainingDecl);
+static bool range_init_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                          EvalFn Evaluator, DiagFn Diagnoser,
+                          bool AllowInjection, QualType ResultTy,
+                          SourceRange Range, ArrayRef<Expr *> Args,
+                          Decl *ContainingDecl);
+static bool loop_variable_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                             EvalFn Evaluator, DiagFn Diagnoser,
+                             bool AllowInjection, QualType ResultTy,
+                             SourceRange Range, ArrayRef<Expr *> Args,
+                             Decl *ContainingDecl);
+
 // -----------------------------------------------------------------------------
 // Metafunction table
 //
@@ -1054,6 +1091,15 @@ static constexpr Metafunction Metafunctions[] = {
   { Metafunction::MFRK_metaInfo, 1, 1, declared_variable_of },
   { Metafunction::MFRK_metaInfo, 1, 1, initializer_of },
   { Metafunction::MFRK_metaInfo, 1, 1, expression_of },
+
+  // Control-flow statement reflection metafunctions (if/for/while/range-for)
+  { Metafunction::MFRK_metaInfo, 1, 1, init_statement_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, then_statement_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, else_statement_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, increment_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, loop_body_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, range_init_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, loop_variable_of },
 };
 constexpr const unsigned NumMetafunctions = sizeof(Metafunctions) /
                                             sizeof(Metafunction);
@@ -7787,6 +7833,8 @@ static Expr *conditionalCommonOperand(AbstractConditionalOperator *CO) {
 }
 
 // condition_of(^^{ c ? a : b }) -> the condition `c`.
+// Also accepts a reflected `if`/`for`/`while` statement, giving its header
+// condition (null if the statement has none, e.g. `for (init;;inc)`).
 bool condition_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                   EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
                   QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
@@ -7794,6 +7842,25 @@ bool condition_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   APValue RV;
   if (!Evaluator(RV, Args[0], true))
     return true;
+
+  if (RV.isReflectedStatement()) {
+    Stmt *S = RV.getReflectedStatement();
+    Expr *Cond;
+    if (auto *IS = dyn_cast<IfStmt>(S))
+      Cond = IS->getCond();
+    else if (auto *FS = dyn_cast<ForStmt>(S))
+      Cond = FS->getCond();
+    else if (auto *WS = dyn_cast<WhileStmt>(S))
+      Cond = WS->getCond();
+    else {
+      Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+          << "an if/for/while statement or a conditional expression" << Range;
+      return true;
+    }
+    if (!Cond)
+      return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+    return SetAndSucceed(Result, APValue(ReflectionKind::Expression, Cond));
+  }
 
   bool Failed;
   AbstractConditionalOperator *CO =
@@ -7914,19 +7981,20 @@ bool statement_kind_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   Stmt *S = RV.getReflectedStatement();
 
   // stmt_kind values: compound=0, decl=1, return_=2, expression=3,
-  // if_=4, for_=5, while_=6, other=7. Must match <meta>'s stmt_kind enum.
+  // if_=4, for_=5, while_=6, other=7, range_for_=8.
   size_t Kind;
   if (isa<Expr>(S)) {
     Kind = 3; // expression
   } else {
     switch (S->getStmtClass()) {
-    case Stmt::CompoundStmtClass: Kind = 0; break;
-    case Stmt::DeclStmtClass:     Kind = 1; break;
-    case Stmt::ReturnStmtClass:   Kind = 2; break;
-    case Stmt::IfStmtClass:       Kind = 4; break;
-    case Stmt::ForStmtClass:      Kind = 5; break;
-    case Stmt::WhileStmtClass:    Kind = 6; break;
-    default:                      Kind = 7; break;
+    case Stmt::CompoundStmtClass:     Kind = 0; break;
+    case Stmt::DeclStmtClass:         Kind = 1; break;
+    case Stmt::ReturnStmtClass:       Kind = 2; break;
+    case Stmt::IfStmtClass:           Kind = 4; break;
+    case Stmt::ForStmtClass:          Kind = 5; break;
+    case Stmt::WhileStmtClass:        Kind = 6; break;
+    case Stmt::CXXForRangeStmtClass:  Kind = 8; break;
+    default:                          Kind = 7; break;
     }
   }
 
@@ -8111,6 +8179,200 @@ bool expression_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   }
 
   return SetAndSucceed(Result, APValue(ReflectionKind::Expression, E));
+}
+
+// ---------------------------------------------------------------------------
+// Control-flow statement reflection metafunctions (if/for/while/range-for)
+// ---------------------------------------------------------------------------
+
+// init_statement_of(^^{ if (init; cond) ... }) or
+// init_statement_of(^^{ for (init; cond; inc) ... }) -> the init-statement,
+// or a null reflection if the statement has none.
+bool init_statement_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                       EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                       QualType ResultTy, SourceRange Range,
+                       ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  Stmt *S = RV.getReflectedStatement();
+  Stmt *Init;
+  if (auto *IS = dyn_cast<IfStmt>(S))
+    Init = IS->getInit();
+  else if (auto *FS = dyn_cast<ForStmt>(S))
+    Init = FS->getInit();
+  else {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "an if or for statement" << Range;
+    return true;
+  }
+
+  if (!Init)
+    return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+  return SetAndSucceed(Result, APValue(ReflectionKind::Statement, Init));
+}
+
+// then_statement_of(^^{ if (cond) then else }) -> the then-branch.
+bool then_statement_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                       EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                       QualType ResultTy, SourceRange Range,
+                       ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  auto *IS = dyn_cast<IfStmt>(RV.getReflectedStatement());
+  if (!IS) {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "an if statement" << Range;
+    return true;
+  }
+
+  return SetAndSucceed(Result, APValue(ReflectionKind::Statement, IS->getThen()));
+}
+
+// else_statement_of(^^{ if (cond) then else }) -> the else-branch, or a null
+// reflection if there isn't one.
+bool else_statement_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                       EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                       QualType ResultTy, SourceRange Range,
+                       ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  auto *IS = dyn_cast<IfStmt>(RV.getReflectedStatement());
+  if (!IS) {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "an if statement" << Range;
+    return true;
+  }
+
+  if (!IS->getElse())
+    return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+  return SetAndSucceed(Result,
+                       APValue(ReflectionKind::Statement, IS->getElse()));
+}
+
+// increment_of(^^{ for (init; cond; inc) ... }) -> the increment expression,
+// or a null reflection if the statement has none.
+bool increment_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                  EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                  QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
+                  Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  auto *FS = dyn_cast<ForStmt>(RV.getReflectedStatement());
+  if (!FS) {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "a for statement" << Range;
+    return true;
+  }
+
+  if (!FS->getInc())
+    return SetAndSucceed(Result, APValue(ReflectionKind::Null, nullptr));
+  return SetAndSucceed(Result,
+                       APValue(ReflectionKind::Expression, FS->getInc()));
+}
+
+// loop_body_of(^^{ for/while/range-for (...) body }) -> the loop body.
+// Distinct from body_of, which is function-only.
+bool loop_body_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                  EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                  QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
+                  Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  Stmt *S = RV.getReflectedStatement();
+  Stmt *Body;
+  if (auto *FS = dyn_cast<ForStmt>(S))
+    Body = FS->getBody();
+  else if (auto *WS = dyn_cast<WhileStmt>(S))
+    Body = WS->getBody();
+  else if (auto *RFS = dyn_cast<CXXForRangeStmt>(S))
+    Body = RFS->getBody();
+  else {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "a for, while, or range-for statement" << Range;
+    return true;
+  }
+
+  return SetAndSucceed(Result, APValue(ReflectionKind::Statement, Body));
+}
+
+// range_init_of(^^{ for (decl : range) body }) -> the range expression.
+bool range_init_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                   EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                   QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
+                   Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  auto *RFS = dyn_cast<CXXForRangeStmt>(RV.getReflectedStatement());
+  if (!RFS) {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "a range-for statement" << Range;
+    return true;
+  }
+
+  return SetAndSucceed(Result,
+                       APValue(ReflectionKind::Expression, RFS->getRangeInit()));
+}
+
+// loop_variable_of(^^{ for (decl : range) body }) -> the declared loop
+// variable (a Declaration reflection, same convention as declared_variable_of).
+bool loop_variable_of(APValue &Result, ASTContext &C, MetaActions &Meta,
+                      EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                      QualType ResultTy, SourceRange Range,
+                      ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+
+  if (!RV.isReflectedStatement())
+    return DiagnoseReflectionKind(Diagnoser, Range, "a statement",
+                                  DescriptionOf(RV));
+
+  auto *RFS = dyn_cast<CXXForRangeStmt>(RV.getReflectedStatement());
+  if (!RFS) {
+    Diagnoser(Range.getBegin(), diag::metafn_expected_reflection_of)
+        << "a range-for statement" << Range;
+    return true;
+  }
+
+  return SetAndSucceed(Result,
+                       APValue(ReflectionKind::Declaration,
+                               RFS->getLoopVariable()));
 }
 
 }  // end namespace clang

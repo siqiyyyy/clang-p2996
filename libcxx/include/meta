@@ -607,6 +607,15 @@ enum : unsigned {
   __metafn_declared_variable_of,
   __metafn_initializer_of,
   __metafn_expression_of,
+
+  // Control-flow statement reflection metafunctions (if/for/while/range-for)
+  __metafn_init_statement_of,
+  __metafn_then_statement_of,
+  __metafn_else_statement_of,
+  __metafn_increment_of,
+  __metafn_loop_body_of,
+  __metafn_range_init_of,
+  __metafn_loop_variable_of,
 };
 
 consteval auto __workaround_expand_compiler_builtins(info type) -> info;
@@ -2456,6 +2465,26 @@ consteval bool is_expression_statement(info r) {
          __metafunction(detail::__metafn_statement_kind_of, r) == 3;
 }
 
+consteval bool is_if_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 4;
+}
+
+consteval bool is_for_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 5;
+}
+
+consteval bool is_while_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 6;
+}
+
+consteval bool is_range_for_statement(info r) {
+  return is_statement(r) &&
+         __metafunction(detail::__metafn_statement_kind_of, r) == 8;
+}
+
 // Child statements of a compound (or any) statement.
 consteval auto statements_of(info r) -> vector<info> {
   vector<info> result;
@@ -2472,9 +2501,58 @@ consteval info return_value_of(info r) {
   return __metafunction(detail::__metafn_return_value_of, r);
 }
 
+// Bridges an expression-statement (a Statement whose node is an Expr) to its
+// expression view, which can then be spliced / inspected as an expression.
+consteval info expression_of(info r) {
+  return __metafunction(detail::__metafn_expression_of, r);
+}
+
 // The variable declared by a single-variable declaration statement.
 consteval info declared_variable_of(info r) {
   return __metafunction(detail::__metafn_declared_variable_of, r);
+}
+
+// Role accessors for if/for/while/range-for statements. Each gives back a
+// null reflection where the role is syntactically optional and absent
+// (e.g. `init_statement_of` on a `for` with no init-statement, or
+// `else_statement_of` on an `if` with no else-branch) -- same convention as
+// `return_value_of` on a bare `return;`.
+
+// The init-statement of `if (init; cond) ...` or `for (init; cond; inc) ...`.
+consteval info init_statement_of(info r) {
+  return __metafunction(detail::__metafn_init_statement_of, r);
+}
+
+// The then-branch of an if statement.
+consteval info then_statement_of(info r) {
+  return __metafunction(detail::__metafn_then_statement_of, r);
+}
+
+// The else-branch of an if statement, or a null reflection if there is none.
+consteval info else_statement_of(info r) {
+  return __metafunction(detail::__metafn_else_statement_of, r);
+}
+
+// The increment expression of `for (init; cond; inc) ...`.
+consteval info increment_of(info r) {
+  return __metafunction(detail::__metafn_increment_of, r);
+}
+
+// The body of a for, while, or range-for statement. Distinct from body_of,
+// which reflects a function's body.
+consteval info loop_body_of(info r) {
+  return __metafunction(detail::__metafn_loop_body_of, r);
+}
+
+// The range expression of `for (decl : range) ...`.
+consteval info range_init_of(info r) {
+  return __metafunction(detail::__metafn_range_init_of, r);
+}
+
+// The declared loop variable of `for (decl : range) ...` (a Declaration
+// reflection, same convention as declared_variable_of).
+consteval info loop_variable_of(info r) {
+  return __metafunction(detail::__metafn_loop_variable_of, r);
 }
 
 
