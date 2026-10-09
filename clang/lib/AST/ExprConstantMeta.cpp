@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "AttributeScratchpad.h"
 #include "clang/AST/APValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
@@ -35,6 +36,7 @@
 #include "clang/Sema/ParsedAttr.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/raw_ostream.h"
 #include <optional>
 
@@ -622,6 +624,19 @@ static bool define_enum(APValue &Result, ASTContext &C, MetaActions &Meta,
                              SourceRange Range, ArrayRef<Expr *> Args,
                              Decl *ContainingDecl);
 
+static bool define_unscoped_enum(APValue &Result, ASTContext &C,
+                             MetaActions &Meta, EvalFn Evaluator,
+                             DiagFn Diagnoser, bool AllowInjection,
+                             QualType ResultTy, SourceRange Range,
+                             ArrayRef<Expr *> Args, Decl *ContainingDecl);
+
+static bool define_encoded_static_string(APValue &Result, ASTContext &C,
+                                         MetaActions &Meta, EvalFn Evaluator,
+                                         DiagFn Diagnoser, bool AllowInjection,
+                                         QualType ResultTy, SourceRange Range,
+                                         ArrayRef<Expr *> Args,
+                                         Decl *ContainingDecl);
+
 static bool offset_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                       EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
                       QualType ResultTy, SourceRange Range,
@@ -749,6 +764,24 @@ static bool is_attribute(APValue &Result, ASTContext &C,
                          ArrayRef<Expr *> Args, Decl *ContainingDecl);
 
 static bool has_attribute(APValue &Result, ASTContext &C,
+                         MetaActions &Meta, EvalFn Evaluator,
+                         DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl);
+
+static bool has_attribute_namespace(APValue &Result, ASTContext &C,
+                         MetaActions &Meta, EvalFn Evaluator,
+                         DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl);
+
+static bool attribute_token_of(APValue &Result, ASTContext &C,
+                         MetaActions &Meta, EvalFn Evaluator,
+                         DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl);
+
+static bool attribute_namespace_of(APValue &Result, ASTContext &C,
                          MetaActions &Meta, EvalFn Evaluator,
                          DiagFn Diagnoser, bool AllowInjection,
                          QualType ResultTy, SourceRange Range,
@@ -1012,7 +1045,8 @@ static constexpr Metafunction Metafunctions[] = {
   { Metafunction::MFRK_bool, 1, 1, is_explicit_object_parameter },
   { Metafunction::MFRK_bool, 1, 1, is_function_parameter },
   { Metafunction::MFRK_metaInfo, 1, 1, return_type_of },
-  { Metafunction::MFRK_metaInfo, 1, 1, variable_of },
+  { Metafunction::MFRK_metaInfo, 1, 1, variable_of,
+    Metafunction::MFEK_Caller },
 
   // P3394 annotation metafunction extensions
   { Metafunction::MFRK_metaInfo, 3, 3, get_ith_annotation_of },
@@ -1023,6 +1057,9 @@ static constexpr Metafunction Metafunctions[] = {
   { Metafunction::MFRK_metaInfo, 3, 3, get_ith_attribute_of },
   { Metafunction::MFRK_bool, 1, 1, is_attribute },
   { Metafunction::MFRK_bool, 3, 3, has_attribute },
+  { Metafunction::MFRK_bool, 1, 1, has_attribute_namespace },
+  { Metafunction::MFRK_spliceFromArg, 3, 3, attribute_token_of },
+  { Metafunction::MFRK_spliceFromArg, 3, 3, attribute_namespace_of },
 
   // P3493 accessibility extensions
   { Metafunction::MFRK_metaInfo, 0, 0, current_access_context },
@@ -1031,6 +1068,12 @@ static constexpr Metafunction Metafunctions[] = {
   // Other bespoke functions (not proposed at this time)
   { Metafunction::MFRK_bool, 1, 1, is_access_specified },
   { Metafunction::MFRK_metaInfo, 5, 5, reflect_invoke },
+
+  // P4033 extension: completing unscoped (C-style) enums
+  { Metafunction::MFRK_metaInfo, 3, 3, define_unscoped_enum },
+
+  // P3867: define_encoded_static_string
+  { Metafunction::MFRK_spliceFromArg, 3, 3, define_encoded_static_string },
 
   // Expression reflection metafunctions
   { Metafunction::MFRK_bool, 1, 1, is_expression },
@@ -1073,8 +1116,13 @@ bool Metafunction::evaluate(APValue &Result, ASTContext &C,
 }
 
 bool Metafunction::Lookup(unsigned ID, const Metafunction *&result) {
-  if (ID >= NumMetafunctions)
+  // Always write the out-parameter: IDs reach this from deserialized ASTs, and
+  // a caller that forgets to check the return value must not be left holding
+  // whatever happened to be on the stack.
+  if (ID >= NumMetafunctions) {
+    result = nullptr;
     return true;
+  }
 
   result = &Metafunctions[ID];
   return false;
@@ -1154,6 +1202,22 @@ static bool SetAndSucceed(APValue &Out, const APValue &Result) {
   return false;
 }
 
+/// Lifts 'V' into a reflection and stores it in 'Out'.
+///
+/// The reflection-depth counter is a fixed-width field, and 'std::meta::info'
+/// is itself a structural type, so a metafunction handed a reflection can be
+/// asked to reflect it again without bound. Diagnose at the limit rather than
+/// letting 'APValue::Lift' silently produce a value of kind 'None'.
+static bool SetAndSucceedWithLift(APValue &Out, DiagFn Diagnoser,
+                                  SourceRange Range, const APValue &V,
+                                  QualType ResultTy) {
+  if (!V.canLift())
+    return Diagnoser(Range.getBegin(), diag::metafn_reflection_depth_exceeded)
+        << APValue::MaxReflectionDepth << Range;
+
+  return SetAndSucceed(Out, V.Lift(ResultTy));
+}
+
 static TemplateName findTemplateOfDecl(const Decl *D) {
   TemplateDecl *TDecl = nullptr;
   if (const auto *FD = dyn_cast<FunctionDecl>(D)) {
@@ -1224,6 +1288,24 @@ static bool getParameterName(ParmVarDecl *PVD, std::string &Out) {
   // a function declaration, since the DeclContext is not the function but the
   // TranslationUnitDecl.
   FunctionDecl *FD = cast<FunctionDecl>(PVD->getDeclContext());
+
+  // For an instantiated member, instantiating the out-of-line definition
+  // REPLACES the parameters on the same FunctionDecl (no redeclaration is
+  // added), so walking the instantiation's chain reads whichever
+  // redeclaration happened to be instantiated last -- the answer would
+  // depend on instantiation state and could differ between translation
+  // units reflecting the same entity. The template pattern carries the
+  // full declaration chain regardless of instantiation state, so walk
+  // that instead. (Skipped when the pattern contains a parameter pack:
+  // its parameter list does not line up index-for-index with the
+  // instantiation's, and pack-substituted parameters were already
+  // filtered above.)
+  if (FunctionDecl *Pattern = FD->getTemplateInstantiationPattern();
+      Pattern && llvm::none_of(Pattern->parameters(), [&](const ParmVarDecl *P) {
+        return P->isParameterPack() && P->getFunctionScopeIndex() <= ParamIdx;
+      }))
+    FD = Pattern;
+
   FD = FD->getMostRecentDecl();
   PVD = FD->getParamDecl(ParamIdx);
 
@@ -1732,7 +1814,11 @@ static bool isFunctionOrMethodNoexcept(const QualType QT) {
 
 static bool isConstQualifiedType(QualType QT) {
   bool result = QT.isConstQualified();
-  if (auto *FPT = dyn_cast<FunctionProtoType>(QT))
+  // getAs, not dyn_cast: attributes on a function declarator (e.g.
+  // [[clang::lifetimebound]] on the implicit object parameter) wrap the
+  // FunctionProtoType in AttributedType sugar that dyn_cast cannot see
+  // through, silently dropping the method qualifiers.
+  if (const auto *FPT = QT->getAs<FunctionProtoType>())
     result |= FPT->isConst();
 
   return result;
@@ -1740,7 +1826,7 @@ static bool isConstQualifiedType(QualType QT) {
 
 static bool isVolatileQualifiedType(QualType QT) {
   bool result = QT.isVolatileQualified();
-  if (auto *FPT = dyn_cast<FunctionProtoType>(QT))
+  if (const auto *FPT = QT->getAs<FunctionProtoType>())
     result |= FPT->isVolatile();
 
   return result;
@@ -1946,15 +2032,92 @@ llvm::SmallVector<const Attr*, 8> static collectUniqueCxx11Attrs(const Decl *D) 
   return Result;
 }
 
-struct AttributeScratchpad {
-  AttributeFactory factory;
-  AttributePool pool;
-  AttributeScratchpad() : factory(), pool(factory) {}
-};
-
 // -----------------------------------------------------------------------------
 // Metafunction implementations
 // -----------------------------------------------------------------------------
+
+bool has_attribute_namespace(APValue &Result, ASTContext &C,
+                         MetaActions &Meta, EvalFn Evaluator,
+                         DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  assert(Args[0]->getType()->isReflectionType());
+  assert(ResultTy == C.BoolTy);
+  APValue RV;
+  if (!Evaluator(RV, Args[0], true))
+    return true;
+  if (RV.getReflectionKind() != ReflectionKind::Attribute) {
+    return SetAndSucceed(Result, makeBool(C, false));
+  }
+  ParsedAttr *attr = RV.getReflectedAttribute();
+
+  return SetAndSucceed(
+    Result,
+    makeBool(C, attr->getForm().getSyntax() == AttributeCommonInfo::Syntax::AS_CXX11 && attr->hasScope())
+  );
+}
+
+bool attribute_namespace_of(APValue &Result, ASTContext &C,
+                         MetaActions &Meta, EvalFn Evaluator,
+                         DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  assert(Args[0]->getType()->isReflectionType());
+
+  APValue RV;
+  if (!Evaluator(RV, Args[1], true))
+    return true;
+
+  bool IsUtf8;
+  {
+    APValue Scratch;
+    if (!Evaluator(Scratch, Args[2], true))
+      return true;
+    IsUtf8 = Scratch.getInt().getBoolValue();
+  }
+
+  if (RV.getReflectionKind() != ReflectionKind::Attribute)
+    return DiagnoseReflectionKind(Diagnoser, Range, "an attribute", DescriptionOf(RV));
+
+  auto name(RV.getReflectedAttribute()->getNormalizedScopeName());
+  if (name.empty())
+    return Diagnoser(Range.getBegin(), diag::metafn_anonymous_entity) << DescriptionOf(RV) << Range;
+
+  Expr *StrLit = makeStrLiteral(name, C, IsUtf8);
+  APValue::LValuePathEntry Path[1] = {APValue::LValuePathEntry::ArrayIndex(0)};
+  return SetAndSucceed(Result, APValue(StrLit, CharUnits::Zero(), Path, false));
+}
+
+bool attribute_token_of(APValue &Result, ASTContext &C,
+                         MetaActions &Meta, EvalFn Evaluator,
+                         DiagFn Diagnoser, bool AllowInjection,
+                         QualType ResultTy, SourceRange Range,
+                         ArrayRef<Expr *> Args, Decl *ContainingDecl) {
+  assert(Args[0]->getType()->isReflectionType());
+
+  APValue RV;
+  if (!Evaluator(RV, Args[1], true))
+    return true;
+
+  bool IsUtf8;
+  {
+    APValue Scratch;
+    if (!Evaluator(Scratch, Args[2], true))
+      return true;
+    IsUtf8 = Scratch.getInt().getBoolValue();
+  }
+
+  if (RV.getReflectionKind() != ReflectionKind::Attribute)
+    return DiagnoseReflectionKind(Diagnoser, Range, "an attribute", DescriptionOf(RV));
+
+  auto name(RV.getReflectedAttribute()->getAttrName()->getName());
+  if (name.empty())
+    return Diagnoser(Range.getBegin(), diag::metafn_anonymous_entity) << DescriptionOf(RV) << Range;
+
+  Expr *StrLit = makeStrLiteral(name, C, IsUtf8);
+  APValue::LValuePathEntry Path[1] = {APValue::LValuePathEntry::ArrayIndex(0)};
+  return SetAndSucceed(Result, APValue(StrLit, CharUnits::Zero(), Path, false));
+}
 
 bool is_unscoped_attribute(APValue &Result, ASTContext &C,
                          MetaActions &Meta, EvalFn Evaluator,
@@ -2035,24 +2198,29 @@ bool is_msvc_attribute(APValue &Result, ASTContext &C,
 // Synthesize back a ParsedAttr from an Attr, the best I can...
 // Return a nullptr if the process met an error
 static const ParsedAttr* toSyntacticForm(const Attr* val, ASTContext * C) {
-  static AttributeScratchpad scratchpad;
+  // Owned by the ASTContext: the pool's allocator is not thread-safe, and the
+  // ParsedAttrs built below point back into this context.
+  AttributeScratchpad &scratchpad = C->getAttributeScratchpad();
   ParsedAttr * recoveredAttr = nullptr;
   auto onArgs = [&](
       IdentifierInfo * attrName,
       SmallVector<llvm::PointerUnion<Expr *, IdentifierLoc *>, 2> argExprs,
+      SmallVector<void *, 2> typeArgs,
       AttributeCommonInfo::Form /* Do we need this fed back to us at all ?...*/
     ) {
       AttributeScopeInfo scope;
       if (val->hasScope())
         scope = AttributeScopeInfo(val->getScopeName(), val->getLoc());
-      recoveredAttr = scratchpad.pool.create(
-        attrName,
-        val->getRange(),
-        scope,
-        argExprs.data(),
-        argExprs.size(),
-        val->getForm()
-      );
+      if (!typeArgs.empty() && argExprs.size() == 1 && argExprs[0].isNull()) {
+        ParsedType pt = ParsedType::getFromOpaquePtr(typeArgs[0]);
+        recoveredAttr = scratchpad.pool.createTypeAttribute(
+          attrName, val->getRange(), scope, pt, val->getForm(),
+          SourceLocation());
+      } else {
+        recoveredAttr = scratchpad.pool.create(
+          attrName, val->getRange(), scope,
+          argExprs.data(), argExprs.size(), val->getForm());
+      }
       return recoveredAttr != nullptr;
     };
     // FIXME why is this not just returning the vector of args...
@@ -2761,19 +2929,6 @@ bool identifier_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     getDeclName(Name, C, RV.getReflectedNamespace());
     break;
   }
-  case ReflectionKind::Attribute: {
-    AttributeCommonInfo *attr = RV.getReflectedAttribute();
-    if (attr->isClangScope()) {
-      Name = "clang::";
-    } else if (attr->isGNUScope()) {
-      Name = "gnu::";
-    } else if (attr->hasScope() &&
-               attr->getScopeName()->getName().compare("msvc") == 0) {
-      Name = "msvc::";
-    }
-    Name += attr->getAttrName()->getName();
-    break;
-  }
   case ReflectionKind::DataMemberSpec: {
     TagDataMemberSpec *TDMS = RV.getReflectedDataMemberSpec();
     if (TDMS->Name)
@@ -2796,6 +2951,7 @@ bool identifier_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   case ReflectionKind::Annotation:
   case ReflectionKind::Statement:
   case ReflectionKind::Expression:
+  case ReflectionKind::Attribute:
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_have_name)
         << DescriptionOf(RV) << Range;
   case ReflectionKind::EntityProxy:
@@ -3330,7 +3486,8 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                     false);
       ConstantTy = QualType{};
     }
-    return SetAndSucceed(Result, Constant.Lift(ConstantTy));
+    return SetAndSucceedWithLift(Result, Diagnoser, Range, Constant,
+                                 ConstantTy);
   }
   case ReflectionKind::Declaration: {
     ValueDecl *Decl = RV.getReflectedDecl();
@@ -3380,7 +3537,8 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
       ConstantTy = QualType{};
     }
 
-    return SetAndSucceed(Result, Constant.Lift(ConstantTy));
+    return SetAndSucceedWithLift(Result, Diagnoser, Range, Constant,
+                                 ConstantTy);
   }
   case ReflectionKind::Annotation: {
     CXX26AnnotationAttr *A = RV.getReflectedAnnotation();
@@ -3395,7 +3553,8 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                     false);
       ConstantTy = QualType{};
     }
-    return SetAndSucceed(Result, Constant.Lift(ConstantTy));
+    return SetAndSucceedWithLift(Result, Diagnoser, Range, Constant,
+                                 ConstantTy);
   }
   case ReflectionKind::Expression: {
     // Reduce a constant expression (e.g. a literal) to a value reflection, so
@@ -3414,7 +3573,8 @@ bool constant_of(APValue &Result, ASTContext &C, MetaActions &Meta,
                     false);
       ConstantTy = QualType{};
     }
-    return SetAndSucceed(Result, Constant.Lift(ConstantTy));
+    return SetAndSucceedWithLift(Result, Diagnoser, Range, Constant,
+                                 ConstantTy);
   }
   case ReflectionKind::Attribute: // TODO P3385 anything to do ?
   case ReflectionKind::Statement:
@@ -4431,11 +4591,11 @@ bool is_lvalue_reference_qualified(APValue &Result, ASTContext &C,
 
   bool result = false;
   if (RV.isReflectedType()) {
-    if (auto FT = dyn_cast<FunctionProtoType>(RV.getReflectedType()))
+    if (const auto *FT = RV.getReflectedType()->getAs<FunctionProtoType>())
       result = (FT->getRefQualifier() == RQ_LValue);
   } else if (RV.isReflectedDecl()) {
     if (const auto *FD = dyn_cast<FunctionDecl>(RV.getReflectedDecl()))
-      if (auto FT = dyn_cast<FunctionProtoType>(FD->getType()))
+      if (const auto *FT = FD->getType()->getAs<FunctionProtoType>())
         result = (FT->getRefQualifier() == RQ_LValue);
   }
   return SetAndSucceed(Result, makeBool(C, result));
@@ -4456,11 +4616,11 @@ bool is_rvalue_reference_qualified(APValue &Result, ASTContext &C,
 
   bool result = false;
   if (RV.isReflectedType()) {
-    if (auto FT = dyn_cast<FunctionProtoType>(RV.getReflectedType()))
+    if (const auto *FT = RV.getReflectedType()->getAs<FunctionProtoType>())
       result = (FT->getRefQualifier() == RQ_RValue);
   } else if (RV.isReflectedDecl()) {
     if (const auto *FD = dyn_cast<FunctionDecl>(RV.getReflectedDecl()))
-      if (auto FT = dyn_cast<FunctionProtoType>(FD->getType()))
+      if (const auto *FT = FD->getType()->getAs<FunctionProtoType>())
         result = (FT->getRefQualifier() == RQ_RValue);
   }
   return SetAndSucceed(Result, makeBool(C, result));
@@ -4946,12 +5106,20 @@ bool is_complete_type(APValue &Result, ASTContext &C, MetaActions &Meta,
 
   bool result = false;
   if (RV.isReflectedType()) {
+    // Desugar aliases first (exactly as the members_of family does): on a
+    // TypedefType, findTypeDecl returns the alias declaration, for which
+    // EnsureInstantiated is a no-op -- a never-yet-instantiated (but
+    // perfectly instantiable) specialization named through an alias then
+    // wrongly reported as incomplete.
+    QualType QT = desugarType(RV.getReflectedType(), /*UnwrapAliases=*/true,
+                              /*DropCV=*/false, /*DropRefs=*/false);
+
     // If this is a declared type with a reachable definition, ensure that the
     // type is instantiated.
-    if (Decl *typeDecl = findTypeDecl(RV.getReflectedType()))
+    if (Decl *typeDecl = findTypeDecl(QT))
       (void) Meta.EnsureInstantiated(typeDecl, Range);
 
-    result = !RV.getReflectedType()->isIncompleteType();
+    result = !QT->isIncompleteType();
   }
   return SetAndSucceed(Result, makeBool(C, result));
 }
@@ -5721,6 +5889,14 @@ bool reflect_result(APValue &Result, ASTContext &C, MetaActions &Meta,
   if (!Evaluator(Arg, Args[1], !IsLValue))
     return true;
 
+  // 'std::meta::info' is a structural type, so 'reflect_constant' accepts a
+  // reflection and yields a reflection of it. Nothing else caps how many times
+  // that can be repeated, so check here before the depth counter would
+  // overflow.
+  if (!Arg.canLift())
+    return Diagnoser(Range.getBegin(), diag::metafn_reflection_depth_exceeded)
+        << APValue::MaxReflectionDepth << Range;
+
   // Construct an expression whose result is 'Arg', and evaluate it to check if
   // it's an allowed result of a constant template argument.
   //
@@ -6024,10 +6200,11 @@ bool is_enumerator_spec(APValue &Result, ASTContext &C,
   return SetAndSucceed(Result, makeBool(C, RV.isReflectedEnumMemberSpec()));
 }
 
-bool define_enum(APValue &Result, ASTContext &C, MetaActions &Meta,
-                 EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
-                 QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
-                 Decl *ContainingDecl) {
+static bool defineEnumImpl(APValue &Result, ASTContext &C, MetaActions &Meta,
+                           EvalFn Evaluator, DiagFn Diagnoser,
+                           bool AllowInjection, SourceRange Range,
+                           ArrayRef<Expr *> Args, Decl *ContainingDecl,
+                           bool RequireScoped) {
   if (!AllowInjection) {
     return Diagnoser(Range.getBegin(),
                      diag::metafn_injected_decl_non_plainly_consteval);
@@ -6048,6 +6225,15 @@ bool define_enum(APValue &Result, ASTContext &C, MetaActions &Meta,
   if (!foundDecl) {
     return DiagnoseReflectionKind(Diagnoser, Range, "an enum type",
                                   DescriptionOf(Scratch));
+  }
+
+  // define_enum only completes scoped enums; define_unscoped_enum only
+  // completes unscoped (C-style) enums.
+  if (foundDecl->isScoped() != RequireScoped) {
+    return Diagnoser(Range.getBegin(),
+                     RequireScoped ? diag::metafn_enum_not_scoped
+                                   : diag::metafn_enum_not_unscoped)
+           << TargetEnum.getAsString();
   }
 
   // Need to check we only have a fwd declare enum
@@ -6092,6 +6278,23 @@ bool define_enum(APValue &Result, ASTContext &C, MetaActions &Meta,
     return true;
   }
   return SetAndSucceed(Result, makeReflection(completedEnum));
+}
+
+bool define_enum(APValue &Result, ASTContext &C, MetaActions &Meta,
+                 EvalFn Evaluator, DiagFn Diagnoser, bool AllowInjection,
+                 QualType ResultTy, SourceRange Range, ArrayRef<Expr *> Args,
+                 Decl *ContainingDecl) {
+  return defineEnumImpl(Result, C, Meta, Evaluator, Diagnoser, AllowInjection,
+                        Range, Args, ContainingDecl, /*RequireScoped=*/true);
+}
+
+bool define_unscoped_enum(APValue &Result, ASTContext &C, MetaActions &Meta,
+                          EvalFn Evaluator, DiagFn Diagnoser,
+                          bool AllowInjection, QualType ResultTy,
+                          SourceRange Range, ArrayRef<Expr *> Args,
+                          Decl *ContainingDecl) {
+  return defineEnumImpl(Result, C, Meta, Evaluator, Diagnoser, AllowInjection,
+                        Range, Args, ContainingDecl, /*RequireScoped=*/false);
 }
 
 bool define_aggregate(APValue &Result, ASTContext &C, MetaActions &Meta,
@@ -6480,7 +6683,7 @@ bool get_ith_parameter_of(APValue &Result, ASTContext &C, MetaActions &Meta,
 
   switch (RV.getReflectionKind()) {
   case ReflectionKind::Type: {
-    if (auto FT = dyn_cast<FunctionProtoType>(RV.getReflectedType())) {
+    if (const auto *FT = RV.getReflectedType()->getAs<FunctionProtoType>()) {
       unsigned numParams = FT->getNumParams();
       if (idx >= numParams)
         return SetAndSucceed(Result, Sentinel);
@@ -6549,7 +6752,7 @@ bool has_ellipsis_parameter(APValue &Result, ASTContext &C, MetaActions &Meta,
     return Diagnoser(Range.getBegin(), diag::metafn_cannot_query_property)
       << 5 << DescriptionOf(RV) << Range;
   case ReflectionKind::Type:
-    if (auto *FPT = dyn_cast<FunctionProtoType>(RV.getReflectedType())) {
+    if (const auto *FPT = RV.getReflectedType()->getAs<FunctionProtoType>()) {
       bool HasEllipsis = FPT->isVariadic();
       return SetAndSucceed(Result, makeBool(C, HasEllipsis));
     }
@@ -6650,7 +6853,7 @@ bool return_type_of(APValue &Result, ASTContext &C, MetaActions &Meta,
 
   switch (RV.getReflectionKind()) {
   case ReflectionKind::Type: {
-    if (auto *FPT = dyn_cast<FunctionProtoType>(RV.getReflectedType())) {
+    if (const auto *FPT = RV.getReflectedType()->getAs<FunctionProtoType>()) {
       QualType QT =
           desugarType(FPT->getReturnType(), /*UnwrapAliases=*/ true,
                       /*DropCV=*/false, /*DropRefs=*/false);
@@ -6706,7 +6909,13 @@ bool variable_of(APValue &Result, ASTContext &C, MetaActions &Meta,
   ParmVarDecl *PVD = RV.getReflectedParameter();
   FunctionDecl *FD = cast<FunctionDecl>(PVD->getDeclContext());
 
-  if (Meta.CurrentCtx()->getCanonicalDecl() != FD->getCanonicalDecl())
+  Decl *EvaluationContext = ContainingDecl ? ContainingDecl : Meta.CurrentCtx();
+  FunctionDecl *EvaluationFunction = dyn_cast<FunctionDecl>(EvaluationContext);
+  if (!EvaluationFunction)
+    EvaluationFunction =
+        dyn_cast_or_null<FunctionDecl>(EvaluationContext->getDeclContext());
+  if (!EvaluationFunction || EvaluationFunction->getCanonicalDecl() !=
+                                 FD->getCanonicalDecl())
     return true;
   assert(FD->getDefinition());
   PVD = FD->getDefinition()->getParamDecl(PVD->getFunctionScopeIndex());
@@ -7465,7 +7674,93 @@ bool reflect_invoke(APValue &Result, ASTContext &C, MetaActions &Meta,
               makeReflection(
                   const_cast<ValueDecl *>(LVBase.get<const ValueDecl *>())));
 
-  return SetAndSucceed(Result, EvalResult.Val.Lift(CallExpr->getType()));
+  return SetAndSucceedWithLift(Result, Diagnoser, Range, EvalResult.Val,
+                               CallExpr->getType());
+}
+
+// -----------------------------------------------------------------------------
+// P3867: define_encoded_static_string
+// -----------------------------------------------------------------------------
+
+static std::optional<StringLiteralKind>
+stringLiteralKindForCharType(ASTContext &C, QualType CharTy) {
+  if (CharTy->isWideCharType())
+    return StringLiteralKind::Wide;
+  if (CharTy->isChar8Type())
+    return StringLiteralKind::UTF8;
+  if (CharTy->isChar16Type())
+    return StringLiteralKind::UTF16;
+  if (CharTy->isChar32Type())
+    return StringLiteralKind::UTF32;
+  // `isCharType()` also matches signed/unsigned char; P3867 only allows `char`.
+  if (C.hasSameUnqualifiedType(CharTy, C.CharTy))
+    return StringLiteralKind::Ordinary;
+  return std::nullopt;
+}
+
+bool define_encoded_static_string(APValue &Result, ASTContext &C,
+                                  [[maybe_unused]] MetaActions &Meta,
+                                  EvalFn Evaluator, DiagFn Diagnoser,
+                                  [[maybe_unused]] bool AllowInjection,
+                                  QualType ResultTy, SourceRange Range,
+                                  ArrayRef<Expr *> Args,
+                                  [[maybe_unused]] Decl *ContainingDecl) {
+  // ResultTy is `const CharT *`, spliced from the first argument.
+  if (ResultTy.isNull() || !ResultTy->isPointerType())
+    return Diagnoser(Range.getBegin(),
+                     diag::metafn_encoded_string_invalid_char_type)
+           << ResultTy << Range;
+
+  QualType CharTy = ResultTy->getPointeeType().getUnqualifiedType();
+  std::optional<StringLiteralKind> Kind =
+      stringLiteralKindForCharType(C, CharTy);
+  if (!Kind)
+    return Diagnoser(Range.getBegin(),
+                     diag::metafn_encoded_string_invalid_char_type)
+           << CharTy << Range;
+
+  APValue SizeV;
+  if (!Evaluator(SizeV, Args[2], /*ConvertToRValue=*/true))
+    return true;
+  uint64_t Len = SizeV.getInt().getZExtValue();
+
+  APValue DataV;
+  if (!Evaluator(DataV, Args[1], /*ConvertToRValue=*/false))
+    return true;
+
+  std::string Utf8;
+  Expr::EvalResult Status;
+  if (!Args[1]->EvaluateCharRangeAsString(Utf8, Len, DataV, C, Status))
+    return true;
+
+  unsigned CharByteWidth = C.getTypeSizeInChars(CharTy).getQuantity();
+  assert(CharByteWidth == 1 || CharByteWidth == 2 || CharByteWidth == 4);
+
+  // ConvertUTF8toWide requires WideCharWidth * (Source.size() + 1) bytes.
+  llvm::SmallVector<char, 32> Encoded;
+  Encoded.resize((Utf8.size() + 1) * CharByteWidth);
+  char *Ptr = Encoded.data();
+  const llvm::UTF8 *ErrorPtr = nullptr;
+  if (!llvm::ConvertUTF8toWide(CharByteWidth, Utf8, Ptr, ErrorPtr))
+    return Diagnoser(Range.getBegin(),
+                     diag::metafn_encoded_string_conversion_failed)
+           << CharTy << Range;
+
+  unsigned ByteLength = static_cast<unsigned>(Ptr - Encoded.data());
+  assert(ByteLength % CharByteWidth == 0 && "partial output code unit");
+  // ConvertUTF8toWide does not write a terminator; include the extra zeroed
+  // code unit reserved by the resize above, matching Sema string literals.
+  ByteLength += CharByteWidth;
+  unsigned NumChars = ByteLength / CharByteWidth;
+
+  // getStringLiteralArrayType adds a trailing NUL to the array type.
+  QualType StrLitTy = C.getStringLiteralArrayType(CharTy, NumChars - 1);
+  Expr *StrLit =
+      StringLiteral::Create(C, StringRef(Encoded.data(), ByteLength), *Kind,
+                            /*Pascal=*/false, StrLitTy, SourceLocation{});
+
+  APValue::LValuePathEntry Path[1] = {APValue::LValuePathEntry::ArrayIndex(0)};
+  return SetAndSucceed(Result, APValue(StrLit, CharUnits::Zero(), Path, false));
 }
 
 // =============================================================================

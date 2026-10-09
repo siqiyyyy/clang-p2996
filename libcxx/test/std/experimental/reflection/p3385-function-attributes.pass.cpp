@@ -10,7 +10,7 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
+// ADDITIONAL_COMPILE_FLAGS: -freflection-latest
 // ADDITIONAL_COMPILE_FLAGS: -fattribute-reflection
 
 // <experimental/reflection>
@@ -23,7 +23,7 @@
 
 consteval bool testAttributesOfFunc() {
   static_assert(attributes_of(^^func).size() == 1);
-  static_assert(identifier_of(attributes_of(^^func)[0]) == "nodiscard");
+  static_assert(attribute_token_of(attributes_of(^^func)[0]) == "nodiscard");
   static_assert(attributes_of(^^func)[0] == ^^[[nodiscard]]);
   return true;
 }

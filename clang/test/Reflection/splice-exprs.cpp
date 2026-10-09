@@ -20,7 +20,7 @@ struct C {
 };
 
 auto c = C{.i=2};
-auto v = c.[:^^C::i:];  // expected-error {{not derived from}}
+auto v = c.[:^^C::i:];
 
 static union { int m; };
 constexpr auto r = ^^m;
@@ -241,7 +241,7 @@ struct S {
     static_assert([:^^S:]::l == 3);
     (void) this->[:^^k:];
     (void) this->[:^^S:]::k;
-    this->[:^^fn2:]();
+    this->[:^^S::fn2:]();
     this->[:^^S:]::fn2();
   }
 };
@@ -387,3 +387,30 @@ void g() {
    f<int>();
 }
 }  // namespace bb_clang_p2996_issue_132_regression_test
+
+                  // ========================================
+                  // bb_clang_p2996_issue_350_regression_test
+                  // ========================================
+
+namespace bb_clang_p2996_issue_350_regression_test {
+struct S {
+  int k;
+  consteval int get() const { return k; }
+};
+
+constexpr S s{3};
+constexpr const S *ps = &s;
+constexpr S arr[] = {{4}};
+
+// The base of '->' is an lvalue of pointer type.
+static_assert(ps->[:^^S::k:] == 3);
+static_assert(ps->[:^^S::get:]() == 3);
+
+// The base of '->' is an array, which decays to a pointer.
+static_assert(arr->[:^^S::k:] == 4);
+
+// Dependent splice with a non-dependent lvalue pointer base.
+template <info M>
+consteval int splice_member(const S *p) { return p->[:M:]; }
+static_assert(splice_member<^^S::k>(&s) == 3);
+}  // namespace bb_clang_p2996_issue_350_regression_test

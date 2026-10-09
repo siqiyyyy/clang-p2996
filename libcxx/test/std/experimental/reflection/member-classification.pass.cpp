@@ -21,6 +21,12 @@
 
 constexpr auto ctx = std::meta::access_context::unchecked();
 
+consteval std::meta::info destructor_of(std::meta::info type) {
+  return (std::meta::members_of(type, ctx) |
+          std::views::filter(std::meta::is_destructor))
+      .front();
+}
+
                          // ==========================
                          // class_or_namespace_members
                          // ==========================
@@ -282,29 +288,29 @@ struct S {
     ~S() = delete;
 };
 static_assert(is_deleted(^^deleted));
-static_assert(is_deleted(^^S::~S));
+static_assert(is_deleted(destructor_of(^^S)));
 static_assert(!is_deleted(^^not_deleted));
 
 struct not_dflt {
     ~not_dflt();
 };
-static_assert(!is_defaulted(^^not_dflt::~not_dflt));
+static_assert(!is_defaulted(destructor_of(^^not_dflt)));
 
 struct explicit_dflt {
     ~explicit_dflt() = default;
 };
-static_assert(is_defaulted(^^explicit_dflt::~explicit_dflt));
+static_assert(is_defaulted(destructor_of(^^explicit_dflt)));
 
 struct implicit_dflt {
 };
-static_assert(is_defaulted(^^implicit_dflt::~implicit_dflt));
+static_assert(is_defaulted(destructor_of(^^implicit_dflt)));
 
 struct impl_dflt {
     ~impl_dflt();
 };
-static_assert(!is_defaulted(^^impl_dflt::~impl_dflt));
+static_assert(!is_defaulted(destructor_of(^^impl_dflt)));
 impl_dflt::~impl_dflt() = default;
-static_assert(is_defaulted(^^impl_dflt::~impl_dflt));
+static_assert(is_defaulted(destructor_of(^^impl_dflt)));
 
 int x;
 void fn();
@@ -706,13 +712,13 @@ static_assert(!is_noexcept(type_of(^^E_Something)));
 
 // Defaulted special members
 struct DelDest { ~DelDest() = delete; };
-static_assert(is_noexcept (^^DelDest::~DelDest));
+static_assert(is_noexcept(destructor_of(^^DelDest)));
 
 struct DefDest { ~DefDest() = default; };
-static_assert(is_noexcept (^^DefDest::~DefDest));
+static_assert(is_noexcept(destructor_of(^^DefDest)));
 
 struct EmptyStruct { };
-static_assert(is_noexcept (^^EmptyStruct::~EmptyStruct));
+static_assert(is_noexcept(destructor_of(^^EmptyStruct)));
 } // namespace noexcept_functions
 
                               // ================
@@ -996,65 +1002,72 @@ int operator""_b();
 constexpr auto conversion_template =
     (members_of(^^T, ctx) | std::views::filter(std::meta::is_template)).front();
 
+// An operator-function-id or literal-operator-id without template arguments
+// that names only a function template cannot be reflected ([expr.reflect]/7.2),
+// so these templates are reached through a specialization.
+constexpr auto member_operator_template = template_of(^^S::operator-<int>);
+constexpr auto nonmember_operator_template = template_of(^^operator||<int>);
+constexpr auto literal_operator_template = template_of(^^operator""_b<'a'>);
+
 static_assert(is_operator_function(^^S::operator+));
 static_assert(is_operator_function(^^operator&&));
-static_assert(!is_operator_function(^^operator||));
-static_assert(!is_operator_function(^^S::operator-));
+static_assert(!is_operator_function(nonmember_operator_template));
+static_assert(!is_operator_function(member_operator_template));
 static_assert(is_operator_function(^^S::operator-<int>));
 static_assert(!is_operator_function(conversion_template));
 static_assert(!is_operator_function(^^S::fn));
 static_assert(!is_operator_function(^^operator""_a));
-static_assert(!is_operator_function(^^operator""_b));
+static_assert(!is_operator_function(literal_operator_template));
 
 static_assert(!is_operator_function_template(^^S::operator+));
 static_assert(!is_operator_function_template(^^operator&&));
-static_assert(is_operator_function_template(^^operator||));
-static_assert(is_operator_function_template(^^S::operator-));
+static_assert(is_operator_function_template(nonmember_operator_template));
+static_assert(is_operator_function_template(member_operator_template));
 static_assert(!is_operator_function_template(^^S::operator int));
 static_assert(!is_operator_function_template(conversion_template));
 static_assert(!is_operator_function_template(^^S::fn));
 static_assert(!is_operator_function_template(^^operator""_a));
-static_assert(!is_operator_function_template(^^operator""_b));
+static_assert(!is_operator_function_template(literal_operator_template));
 
 static_assert(!is_conversion_function(^^S::operator+));
 static_assert(!is_conversion_function(^^operator&&));
-static_assert(!is_conversion_function(^^operator||));
-static_assert(!is_conversion_function(^^S::operator-));
+static_assert(!is_conversion_function(nonmember_operator_template));
+static_assert(!is_conversion_function(member_operator_template));
 static_assert(is_conversion_function(^^S::operator int));
 static_assert(!is_conversion_function(conversion_template));
 static_assert(!is_conversion_function(^^S::fn));
 static_assert(!is_conversion_function(^^operator""_a));
-static_assert(!is_conversion_function(^^operator""_b));
+static_assert(!is_conversion_function(literal_operator_template));
 
 static_assert(!is_conversion_function_template(^^S::operator+));
 static_assert(!is_conversion_function_template(^^operator&&));
-static_assert(!is_conversion_function_template(^^operator||));
-static_assert(!is_conversion_function_template(^^S::operator-));
+static_assert(!is_conversion_function_template(nonmember_operator_template));
+static_assert(!is_conversion_function_template(member_operator_template));
 static_assert(!is_conversion_function_template(^^S::operator int));
 static_assert(is_conversion_function_template(conversion_template));
 static_assert(!is_conversion_function_template(^^S::fn));
 static_assert(!is_conversion_function_template(^^operator""_a));
-static_assert(!is_conversion_function_template(^^operator""_b));
+static_assert(!is_conversion_function_template(literal_operator_template));
 
 static_assert(!is_literal_operator(^^S::operator+));
 static_assert(!is_literal_operator(^^operator&&));
-static_assert(!is_literal_operator(^^operator||));
-static_assert(!is_literal_operator(^^S::operator-));
+static_assert(!is_literal_operator(nonmember_operator_template));
+static_assert(!is_literal_operator(member_operator_template));
 static_assert(!is_literal_operator(^^S::operator-<int>));
 static_assert(!is_literal_operator(conversion_template));
 static_assert(!is_literal_operator(^^S::fn));
 static_assert(is_literal_operator(^^operator""_a));
-static_assert(!is_literal_operator(^^operator""_b));
+static_assert(!is_literal_operator(literal_operator_template));
 
 static_assert(!is_literal_operator_template(^^S::operator+));
 static_assert(!is_literal_operator_template(^^operator&&));
-static_assert(!is_literal_operator_template(^^operator||));
-static_assert(!is_literal_operator_template(^^S::operator-));
+static_assert(!is_literal_operator_template(nonmember_operator_template));
+static_assert(!is_literal_operator_template(member_operator_template));
 static_assert(!is_literal_operator_template(^^S::operator-<int>));
 static_assert(!is_literal_operator_template(conversion_template));
 static_assert(!is_literal_operator_template(^^S::fn));
 static_assert(!is_literal_operator_template(^^operator""_a));
-static_assert(is_literal_operator_template(^^operator""_b));
+static_assert(is_literal_operator_template(literal_operator_template));
 
 }  // namespace operators_and_conversion_functions
 

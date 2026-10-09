@@ -3198,6 +3198,9 @@ def err_reflect_nttp : Error<
   "cannot take the reflection of a non-type template parameter">;
 def err_reflect_using_declarator : Error<
   "cannot take the reflection of a using-declarator">;
+def err_reflect_unqualified_member_function : Error<
+  "cannot take the reflection of non-static member function %0 named by an "
+  "unqualified name">;
 def err_reflect_init_capture : Error<
   "cannot take the reflection of a local entity declared by init-capture">;
 def err_reflect_local_requires_param : Error<
@@ -3205,6 +3208,8 @@ def err_reflect_local_requires_param : Error<
 def err_reflect_intervening_lambda : Error<
   "cannot take the reflection of a local entity for which there is an "
   "intervening lambda expression">;
+def err_reflection_depth_exceeded : Error<
+  "reflection would nest more than %0 levels deep">;
 
 def err_splice_operand_not_reflection : Error<
   "splice operand must be a reflection">;

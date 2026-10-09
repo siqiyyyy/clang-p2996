@@ -287,13 +287,37 @@ public:
                                CTSD->getTemplateArgs().asArray()))
         return true;
 
+      // Complete the specialization with ordinary implicit-instantiation
+      // semantics, mirroring Sema::RequireCompleteTypeImpl: member
+      // DECLARATIONS are instantiated, member DEFINITIONS remain subject to
+      // lazy, odr-use-driven instantiation. Completing with
+      // TSK_ExplicitInstantiationDefinition and instantiating every member
+      // definition wrong-rejected specializations whose never-odr-used member
+      // bodies are ill-formed (the "specialized storage base" idiom, e.g.
+      // tl::expected<void, E>), and made the result depend on whether earlier
+      // code happened to have instantiated the class already.
       if (S.InstantiateClassTemplateSpecialization(
-              Range.getBegin(), CTSD, TSK_ExplicitInstantiationDefinition, false,
-              false))
+              Range.getBegin(), CTSD, TSK_ImplicitInstantiation,
+              /*Complain=*/false, CTSD->hasStrictPackMatch()))
         return false;
-
-      S.InstantiateClassTemplateSpecializationMembers(
-              Range.getBegin(), CTSD, TSK_ExplicitInstantiationDefinition);
+    } else if (auto *RD = dyn_cast<CXXRecordDecl>(D);
+               RD && !RD->isCompleteDefinition() && !RD->isBeingDefined() &&
+               !RD->isDependentContext() &&
+               RD->getInstantiatedFromMemberClass()) {
+      // A member class of an instantiated class template: complete it the way
+      // Sema::RequireCompleteTypeImpl would. (The eager path above used to
+      // define nested classes as a side effect of instantiating every member
+      // of the enclosing specialization; completing on demand keeps them
+      // reachable for reflection queries.)
+      MemberSpecializationInfo *MSI = RD->getMemberSpecializationInfo();
+      assert(MSI && "missing member specialization information");
+      if (MSI->getTemplateSpecializationKind() != TSK_ExplicitSpecialization &&
+          S.InstantiateClass(Range.getBegin(), RD,
+                             RD->getInstantiatedFromMemberClass(),
+                             S.getTemplateInstantiationArgs(RD),
+                             TSK_ImplicitInstantiation,
+                             /*Complain=*/false))
+        return false;
     } else if (auto *VTSD = dyn_cast<VarTemplateSpecializationDecl>(D);
         VTSD && !VTSD->isCompleteDefinition()) {
       if (!validateConstraints(VTSD->getSpecializedTemplate(),
@@ -944,6 +968,41 @@ ExprResult Sema::ConstevalOnlyRecorder::RecordAndReturn(ExprResult Res) {
   return Res;
 }
 
+/// Returns whether a reflect-expression whose operand is spelled with \p Name
+/// has the form '^^ reflection-name' ([expr.reflect]/5) rather than
+/// '^^ id-expression' ([expr.reflect]/7). A reflection-name is an identifier
+/// without template arguments; only that form is ill-formed when lookup finds
+/// a declaration that replaced a using-declarator ([expr.reflect]/5.1).
+static bool isReflectionNameForm(DeclarationName Name, bool HasTemplateArgs) {
+  return Name.getNameKind() == DeclarationName::Identifier && !HasTemplateArgs;
+}
+
+/// Diagnoses an id-expression that names \p D for which '&id-expression' is
+/// ill-formed ([expr.reflect]/7.2), and returns whether it did. A
+/// reflection-name that names a function template is not an id-expression; it
+/// represents the template ([expr.reflect]/5.5.2).
+static bool diagnoseIllFormedAddressOfFunction(Sema &S, SourceLocation Loc,
+                                               const NamedDecl *D,
+                                               DeclarationName Name,
+                                               bool IsQualified,
+                                               bool HasTemplateArgs) {
+  if (isa<CXXDestructorDecl>(D)) {
+    S.Diag(Loc, diag::err_typecheck_addrof_dtor) << SourceRange(Loc, Loc);
+    return true;
+  }
+  if (auto *MD = dyn_cast<CXXMethodDecl>(D);
+      MD && MD->isInstance() && !IsQualified) {
+    S.Diag(Loc, diag::err_reflect_unqualified_member_function) << MD;
+    return true;
+  }
+  if (isa<FunctionTemplateDecl>(D) && !HasTemplateArgs &&
+      !isReflectionNameForm(Name, /*HasTemplateArgs=*/false)) {
+    S.Diag(Loc, diag::err_reflect_overload_set);
+    return true;
+  }
+  return false;
+}
+
 ExprResult Sema::ActOnCXXReflectExpr(SourceLocation OpLoc,
                                      SourceLocation TemplateKWLoc,
                                      CXXScopeSpec &SS, UnqualifiedId &Id) {
@@ -989,7 +1048,8 @@ ExprResult Sema::ActOnCXXReflectExpr(SourceLocation OpLoc,
   // having more than one candidate.
   if (Found.isAmbiguous()) {
     return ExprError();
-  } else if (Found.isOverloadedResult() && Found.end() - Found.begin() > 1) {
+  } else if (Found.isOverloadedResult() &&
+             !isReflectionNameForm(NameInfo.getName(), TArgs)) {
     Expr *Result = UnresolvedLookupExpr::Create(
           Context, nullptr, SS.getWithLocInContext(Context),
           SourceLocation(), NameInfo, false, TArgs, Found.begin(),
@@ -1003,11 +1063,19 @@ ExprResult Sema::ActOnCXXReflectExpr(SourceLocation OpLoc,
   if (auto *USD = dyn_cast<UsingShadowDecl>(ND)) {
     if (getLangOpts().EntityProxyReflection)
       return BuildCXXReflectExpr(OpLoc, NameInfo.getBeginLoc(), USD);
-    else {
+    if (isReflectionNameForm(NameInfo.getName(), TArgs)) {
       Diag(SS.getBeginLoc(), diag::err_reflect_using_declarator);
       return ExprError();
     }
+
+    // An id-expression names the entity that the using-declarator introduced.
+    ND = USD->getTargetDecl();
   }
+
+  if (diagnoseIllFormedAddressOfFunction(*this, NameInfo.getBeginLoc(), ND,
+                                         NameInfo.getName(), SS.isNotEmpty(),
+                                         TArgs))
+    return ExprError();
 
   if (auto *TD = dyn_cast<TypeDecl>(ND)) {
     QualType QT = Context.getTypeDeclType(TD);
@@ -1145,20 +1213,24 @@ ExprResult Sema::ActOnCXXMetafunction(SourceLocation KwLoc,
   // Find or build a 'std::function' having a lambda with the 'Sema' object
   // (i.e., 'this') and the 'Metafunction' both captured. This will be provided
   // as a callback to evaluate the metafunction at constant evaluation time.
-  const auto &ImplIt = getMetafunctionCb(FnID);
+  const CXXMetafunctionExpr::ImplFn *Impl = getMetafunctionCb(FnID);
+  if (!Impl) {
+    Diag(FnIDArg->getExprLoc(), diag::err_unknown_metafunction);
+    return ExprError();
+  }
 
   // Return the CXXMetafunctionExpr representation.
   return BuildCXXMetafunctionExpr(KwLoc, LParenLoc, RParenLoc,
-                                  FnID, ImplIt, Args);
+                                  FnID, *Impl, Args);
 }
 
-const CXXMetafunctionExpr::ImplFn &Sema::getMetafunctionCb(unsigned FnID) {
+const CXXMetafunctionExpr::ImplFn *Sema::getMetafunctionCb(unsigned FnID) {
   auto ImplIt = MetafunctionImplCbs.find(FnID);
   if (ImplIt == MetafunctionImplCbs.end()) {
     const Metafunction *Metafn;
-    Metafunction::Lookup(FnID, Metafn);
+    if (Metafunction::Lookup(FnID, Metafn))
+      return nullptr;
 
-    assert(Metafn);
     auto MetafnImpl = std::make_unique<CXXMetafunctionExpr::ImplFn>(
         std::function(
             [this, Metafn](APValue &Result,
@@ -1175,7 +1247,7 @@ const CXXMetafunctionExpr::ImplFn &Sema::getMetafunctionCb(unsigned FnID) {
     ImplIt = MetafunctionImplCbs.try_emplace(FnID, std::move(MetafnImpl)).first;
   }
 
-  return *ImplIt->second;
+  return ImplIt->second.get();
 }
 
 SpliceResult Sema::ActOnSpliceSpecifier(SourceLocation LSpliceLoc,
@@ -1266,14 +1338,49 @@ ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
 // TODO(P2996): Capture whole SourceRange of declaration naming.
 ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
                                      SourceLocation OperandLoc, Decl *D) {
+  if (auto *UPD = dyn_cast<UsingPackDecl>(D)) {
+    if (!getLangOpts().EntityProxyReflection &&
+        isReflectionNameForm(UPD->getDeclName(),
+                             /*HasTemplateArgs=*/false)) {
+      Diag(OperandLoc, diag::err_reflect_using_declarator);
+      return ExprError();
+    }
+
+    SmallVector<UsingShadowDecl *, 4> Shadows;
+    for (NamedDecl *Expansion : UPD->expansions()) {
+      auto *UD = dyn_cast<UsingDecl>(Expansion);
+      if (!UD) {
+        Diag(OperandLoc, diag::err_reflect_overload_set);
+        return ExprError();
+      }
+      llvm::append_range(Shadows, UD->shadows());
+    }
+    if (Shadows.size() != 1) {
+      Diag(OperandLoc, diag::err_reflect_overload_set);
+      return ExprError();
+    }
+    D = getLangOpts().EntityProxyReflection
+            ? static_cast<Decl *>(Shadows.front())
+            : static_cast<Decl *>(Shadows.front()->getTargetDecl());
+  }
+
   // This case can happen after transforming a dependent reflection naming a
-  // using-declarator.
+  // using-declarator by an unqualified name.
   if (auto *UD = dyn_cast<UsingDecl>(D)) {
     if (UD->shadow_size() > 1) {
       Diag(OperandLoc, diag::err_reflect_overload_set);
       return ExprError();
     }
-    D = *UD->shadow_begin();
+    UsingShadowDecl *USD = *UD->shadow_begin();
+    D = USD;
+    if (!getLangOpts().EntityProxyReflection &&
+        !isReflectionNameForm(UD->getDeclName(), /*HasTemplateArgs=*/false)) {
+      if (diagnoseIllFormedAddressOfFunction(
+              *this, OperandLoc, USD->getTargetDecl(), UD->getDeclName(),
+              /*IsQualified=*/false, /*HasTemplateArgs=*/false))
+        return ExprError();
+      D = USD->getTargetDecl();
+    }
   }
 
   D = D->getCanonicalDecl();
@@ -1298,6 +1405,13 @@ ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
 ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
                                      SourceLocation OperandLoc,
                                      const TemplateName Template) {
+  if (UsingShadowDecl *USD = Template.getAsUsingShadowDecl()) {
+    if (getLangOpts().EntityProxyReflection)
+      return BuildCXXReflectExpr(OperatorLoc, OperandLoc, USD);
+    Diag(OperandLoc, diag::err_reflect_using_declarator);
+    return ExprError();
+  }
+
   if (Template.getKind() == TemplateName::OverloadedTemplate) {
     Diag(OperandLoc, diag::err_reflect_overload_set);
     return ExprError();
@@ -1322,8 +1436,17 @@ ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc, Expr *E) {
   // Check if this is a reference to a declared entity.
   if (auto *DRE = dyn_cast<DeclRefExpr>(E)) {
     Decl *D = DRE->getDecl();
-    if (auto *F = DRE->getFoundDecl(); isa<UsingShadowDecl>(F))
+    if (auto *F = DRE->getFoundDecl();
+        isa<UsingShadowDecl>(F) &&
+        (getLangOpts().EntityProxyReflection ||
+         isReflectionNameForm(DRE->getNameInfo().getName(),
+                              DRE->hasExplicitTemplateArgs())))
       D = F;
+    else if (diagnoseIllFormedAddressOfFunction(
+                 *this, DRE->getExprLoc(), DRE->getDecl(),
+                 DRE->getNameInfo().getName(), DRE->hasQualifier(),
+                 DRE->hasExplicitTemplateArgs()))
+      return ExprError();
 
     return BuildCXXReflectExpr(OperatorLoc, DRE->getExprLoc(), D);
   }
@@ -1368,39 +1491,19 @@ ExprResult Sema::BuildCXXReflectExpressionExpr(SourceLocation OperatorLoc,
 
 ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
                                      UnresolvedLookupExpr *E) {
-  // If the UnresolvedLookupExpr could refer to multiple candidates, there
-  // will be no means of choosing between them. Raise an error indicating
-  // lack of support for reflection of overload sets at this time.
   auto *ULE = cast<UnresolvedLookupExpr>(E);
-
-  // On the other hand, a unique candidate Decl might refer to a specialized
-  // function template. Begin by inventing a 'VarDecl' for a 'const auto'
-  // variable which would be initialized by the operand 'ULE'.
-  QualType ConstAutoTy = Context.getAutoDeductType().withConst();
-  TypeSourceInfo *TSI = Context.CreateTypeSourceInfo(ConstAutoTy, 0);
-  auto *InventedVD = VarDecl::Create(Context, nullptr, SourceLocation(),
-                                     E->getExprLoc(), nullptr, ConstAutoTy,
-                                     TSI, SC_Auto);
-
-  // Use the 'auto' deduction machinery to infer the operand type.
-  if (DeduceVariableDeclarationType(InventedVD, true, ULE)) {
+  DeclAccessPair FoundOverload;
+  FunctionDecl *FoundDecl =
+      ResolveAddressOfOverloadedFunctionWithoutTarget(ULE, FoundOverload);
+  if (!FoundDecl) {
     Diag(E->getExprLoc(), diag::err_reflect_overload_set)
         << E->getSourceRange();
     return ExprError();
   }
-
-  // Now use the type to obtain the unique overload candidate that this can
-  // refer to; raise an error in the presence of any ambiguity.
-  bool HadMultipleCandidates;
-  DeclAccessPair FoundOverload;
-  FunctionDecl *FoundDecl =
-      ResolveAddressOfOverloadedFunction(ULE, InventedVD->getType(), true,
-                                         FoundOverload,
-                                         &HadMultipleCandidates);
-  if (!FoundDecl) {
-    Diag(E->getExprLoc(), diag::err_reflect_overload_set);
+  if (diagnoseIllFormedAddressOfFunction(
+          *this, E->getNameLoc(), FoundDecl, E->getName(),
+          E->getQualifier() != nullptr, E->hasExplicitTemplateArgs()))
     return ExprError();
-  }
   ExprResult ER = FixOverloadedFunctionReference(E, FoundOverload, FoundDecl);
   assert(!ER.isInvalid() && "could not fix overloaded function reference");
 
@@ -1428,6 +1531,14 @@ ExprResult Sema::BuildCXXReflectExpr(SourceLocation OperatorLoc,
     const ValueDecl *VD = ER.Val.getLValueBase().get<const ValueDecl *>();
     return BuildCXXReflectExpr(OperatorLoc, E->getExprLoc(),
                                const_cast<ValueDecl *>(VD));
+  }
+
+  // A 'std::meta::info' template argument is already a reflection; reflecting
+  // it again nests one level deeper, and the depth counter is finite.
+  if (!ER.Val.canLift()) {
+    Diag(E->getExprLoc(), diag::err_reflection_depth_exceeded)
+        << APValue::MaxReflectionDepth;
+    return ExprError();
   }
 
   APValue RV = ER.Val.Lift(E->getType());

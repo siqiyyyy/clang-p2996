@@ -100,6 +100,8 @@ def metafn_value_not_structural_type : Note<
   "values of non-structural type %0 cannot be represented as reflections">;
 def metafn_result_not_representable : Note<
   "provided %select{value|object}0 cannot be represented by a reflection">;
+def metafn_reflection_depth_exceeded : Note<
+  "reflection would nest more than %0 levels deep">;
 
 def metafn_p3385_non_standard_attribute : Warning<
   "non-standard attribute %0 found when expanding attributes">;
@@ -120,7 +122,17 @@ def metafn_injected_decl_non_plainly_consteval : Note<
 
 // define_enum
 def metafn_enum_already_complete: Note<"%0 already has enumerators defined">;
+def metafn_enum_not_scoped : Note<"%0 is not a scoped enumeration type">;
+def metafn_enum_not_unscoped : Note<"%0 is not an unscoped enumeration type">;
 // Annotation injection.
 def metafn_cannot_annotate : Note<"cannot attach an annotation to %1">;
+
+// P3867 define_encoded_static_string
+def metafn_encoded_string_invalid_char_type
+    : Note<"%0 is not a valid character type for "
+           "define_encoded_static_string">;
+def metafn_encoded_string_conversion_failed
+    : Note<"cannot encode the provided UTF-8 string in the associated "
+           "encoding of %0">;
 
 }  // end of metafn component

@@ -46,6 +46,7 @@
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/CurrentSourceLocExprScope.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/Metafunction.h"
 #include "clang/AST/OSLog.h"
 #include "clang/AST/OptionalDiagnostic.h"
 #include "clang/AST/RecordLayout.h"
@@ -82,6 +83,7 @@ namespace {
   struct LValue;
   class CallStackFrame;
   class EvalInfo;
+  thread_local EvalInfo *CurrentEvalInfo;
 
   using SourceLocExprScopeGuard =
       CurrentSourceLocExprScope::SourceLocExprScopeGuard;
@@ -1027,6 +1029,8 @@ namespace {
       EM_IgnoreSideEffects,
     } EvalMode;
 
+    EvalInfo *PrevCurrentEvalInfo;
+
     /// Are we checking whether the expression is a potential constant
     /// expression?
     bool checkingPotentialConstantExpression() const override  {
@@ -1049,11 +1053,16 @@ namespace {
                       /*This=*/nullptr,
                       /*CallExpr=*/nullptr, CallRef()),
           EvaluatingDecl((const ValueDecl *)nullptr),
+          ContainingDecl(nullptr),
           EvaluatingDeclValue(nullptr), HasActiveDiagnostic(false),
-          HasFoldFailureDiagnostic(false), EvalMode(Mode) {}
+          HasFoldFailureDiagnostic(false), EvalMode(Mode),
+          PrevCurrentEvalInfo(CurrentEvalInfo) {
+      CurrentEvalInfo = this;
+    }
 
     ~EvalInfo() {
       discardCleanups();
+      CurrentEvalInfo = PrevCurrentEvalInfo;
     }
 
     ASTContext &getASTContext() const override { return Ctx; }
@@ -8894,12 +8903,25 @@ bool ExprEvaluatorBase<Derived>::VisitCXXMetafunctionExpr(
       (Info.EvalMode ==
        EvalInfo::EM_ConstantExpressionPlainlyConstantEvaluated);
 
+  // An expression deserialized from a malformed AST file may name no
+  // metafunction at all; the reader has already diagnosed the file.
+  if (!E->hasImpl())
+    return Error(E);
+
   // Evaluate the metafunction.
   APValue Result;
   const CXXMetafunctionExpr::ImplFn &Implementation = E->getImpl();
+  Decl *EvaluationContext = Info.ContainingDecl;
+  const Metafunction *Metafn;
+  if (!Metafunction::Lookup(E->getMetaFnID(), Metafn) &&
+      Metafn->getEvaluationContextKind() == Metafunction::MFEK_Caller) {
+    if (CallStackFrame *Caller = Info.CurrentCall->Caller;
+        Caller && Caller->Callee)
+      EvaluationContext = const_cast<FunctionDecl *>(Caller->Callee);
+  }
   if (Implementation(Result, Evaluator, Diagnoser, AllowInjection,
                      E->getResultType(), Info.CurrentCall->CallRange, Args,
-                     Info.ContainingDecl)) {
+                     EvaluationContext)) {
     bool Result = Error(E);
     Info.addNotes(Diagnostics);
 
@@ -18377,25 +18399,10 @@ std::optional<std::string> Expr::tryEvaluateString(ASTContext &Ctx) const {
 }
 
 template <typename T>
-static bool EvaluateCharRangeAsStringImpl(const Expr *, T &Result,
-                                          const Expr *SizeExpression,
-                                          const Expr *PtrExpression,
-                                          ASTContext &Ctx,
-                                          Expr::EvalResult &Status) {
-  EvalInfo Info(Ctx, Status, EvalInfo::EM_ConstantExpression);
-  Info.InConstantContext = true;
-
-  if (Info.EnableNewConstInterp)
-    return Info.Ctx.getInterpContext().evaluateCharRange(Info, SizeExpression,
-                                                         PtrExpression, Result);
-
-  LValue String;
+static bool ReadCharRange(EvalInfo &Info, T &Result, uint64_t Size,
+                          LValue String, QualType CharTy, const Expr *E,
+                          bool DiagnoseLeaks = true) {
   FullExpressionRAII Scope(Info);
-  APSInt SizeValue;
-  if (!::EvaluateInteger(SizeExpression, SizeValue, Info))
-    return false;
-
-  uint64_t Size = SizeValue.getZExtValue();
 
   // FIXME: better protect against invalid or excessive sizes
   if constexpr (std::is_same_v<APValue, T>)
@@ -18404,14 +18411,10 @@ static bool EvaluateCharRangeAsStringImpl(const Expr *, T &Result,
     if (Size < Result.max_size())
       Result.reserve(Size);
   }
-  if (!::EvaluatePointer(PtrExpression, String, Info))
-    return false;
 
-  QualType CharTy = PtrExpression->getType()->getPointeeType();
   for (uint64_t I = 0; I < Size; ++I) {
     APValue Char;
-    if (!handleLValueToRValueConversion(Info, PtrExpression, CharTy, String,
-                                        Char))
+    if (!handleLValueToRValueConversion(Info, E, CharTy, String, Char))
       return false;
 
     if constexpr (std::is_same_v<APValue, T>) {
@@ -18425,11 +18428,38 @@ static bool EvaluateCharRangeAsStringImpl(const Expr *, T &Result,
       Result.push_back(static_cast<char>(C.getExtValue()));
     }
 
-    if (!HandleLValueArrayAdjustment(Info, PtrExpression, String, CharTy, 1))
+    if (!HandleLValueArrayAdjustment(Info, E, String, CharTy, 1))
       return false;
   }
 
-  return Scope.destroy() && CheckMemoryLeaks(Info);
+  if (!Scope.destroy())
+    return false;
+  return !DiagnoseLeaks || CheckMemoryLeaks(Info);
+}
+
+template <typename T>
+static bool EvaluateCharRangeAsStringImpl(const Expr *, T &Result,
+                                          const Expr *SizeExpression,
+                                          const Expr *PtrExpression,
+                                          ASTContext &Ctx,
+                                          Expr::EvalResult &Status) {
+  EvalInfo Info(Ctx, Status, EvalInfo::EM_ConstantExpression);
+  Info.InConstantContext = true;
+
+  if (Info.EnableNewConstInterp)
+    return Info.Ctx.getInterpContext().evaluateCharRange(Info, SizeExpression,
+                                                         PtrExpression, Result);
+
+  LValue String;
+  APSInt SizeValue;
+  if (!::EvaluateInteger(SizeExpression, SizeValue, Info))
+    return false;
+  if (!::EvaluatePointer(PtrExpression, String, Info))
+    return false;
+
+  return ReadCharRange(Info, Result, SizeValue.getZExtValue(), String,
+                       PtrExpression->getType()->getPointeeType(),
+                       PtrExpression);
 }
 
 bool Expr::EvaluateCharRangeAsString(std::string &Result,
@@ -18446,6 +18476,58 @@ bool Expr::EvaluateCharRangeAsString(APValue &Result,
                                      EvalResult &Status) const {
   return EvaluateCharRangeAsStringImpl(this, Result, SizeExpression,
                                        PtrExpression, Ctx, Status);
+}
+
+template <typename T>
+static bool EvaluateCharRangeAsStringImpl(const Expr *E, T &Result,
+                                          uint64_t Size, APValue Ptr,
+                                          ASTContext &Ctx,
+                                          Expr::EvalResult &Status) {
+  if (Size == 0)
+    return true;
+  if (!Ptr.isLValue())
+    return false;
+
+  auto Read = [&](EvalInfo &Info, bool DiagnoseLeaks) {
+    // A glvalue of pointer type names the pointer object; load it first.
+    if (E->isGLValue() && E->getType()->isPointerType()) {
+      LValue LV;
+      LV.setFrom(Info.Ctx, Ptr);
+      if (!handleLValueToRValueConversion(Info, E, E->getType(), LV, Ptr))
+        return false;
+    }
+
+    LValue String;
+    String.setFrom(Info.Ctx, Ptr);
+
+    QualType PtrTy = E->getType();
+    if (PtrTy->isArrayType())
+      PtrTy = Info.Ctx.getArrayDecayedType(PtrTy);
+    if (!PtrTy->isPointerType())
+      return false;
+
+    return ReadCharRange(Info, Result, Size, String, PtrTy->getPointeeType(), E,
+                         DiagnoseLeaks);
+  };
+
+  if (CurrentEvalInfo)
+    return Read(*CurrentEvalInfo, /*DiagnoseLeaks=*/false);
+
+  EvalInfo Info(Ctx, Status, EvalInfo::EM_ConstantExpression);
+  Info.InConstantContext = true;
+  return Read(Info, /*DiagnoseLeaks=*/true);
+}
+
+bool Expr::EvaluateCharRangeAsString(std::string &Result, uint64_t Size,
+                                     const APValue &Ptr, ASTContext &Ctx,
+                                     EvalResult &Status) const {
+  return EvaluateCharRangeAsStringImpl(this, Result, Size, Ptr, Ctx, Status);
+}
+
+bool Expr::EvaluateCharRangeAsString(APValue &Result, uint64_t Size,
+                                     const APValue &Ptr, ASTContext &Ctx,
+                                     EvalResult &Status) const {
+  return EvaluateCharRangeAsStringImpl(this, Result, Size, Ptr, Ctx, Status);
 }
 
 bool Expr::tryEvaluateStrLen(uint64_t &Result, ASTContext &Ctx) const {

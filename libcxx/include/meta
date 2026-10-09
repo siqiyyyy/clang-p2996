@@ -366,6 +366,9 @@ consteval auto annotate(info) -> info;
 // Attributes reflection (P3385)
 consteval auto is_attribute(info) -> bool;
 consteval auto attributes_of(info r) -> vector<info>;
+consteval auto attribute_namespace_of(info r) -> string_view;
+consteval auto attribute_token_of(info r) -> string_view;
+consteval auto has_attribute_namespace(info r) -> bool;
 
 // modeling access control (P3547)
 struct access_context {
@@ -405,6 +408,12 @@ template <reflection_range R1 = initializer_list<info>,
 
 } // namespace reflection_v2
 } // namespace meta
+
+// P3867 define_encoded_static_string
+template <class CharT, ranges::input_range R>
+  requires same_as<char8_t, ranges::range_value_t<R>>
+consteval const CharT *define_encoded_static_string(R &&r);
+
 } // namespace std
 
 */
@@ -576,6 +585,9 @@ enum : unsigned {
   __metafn_get_ith_attribute_of,
   __metafn_is_attribute,
   __metafn_has_attribute,
+  __metafn_has_attribute_namespace,
+  __metafn_attribute_token_of,
+  __metafn_attribute_namespace_of,
 
   // P3493 accessibility metafunctions
   __metafn_access_context,
@@ -584,6 +596,12 @@ enum : unsigned {
   // Other bespoke functions (not proposed at this time)
   __metafn_is_access_specified,
   __metafn_reflect_invoke,
+
+  // P4033 extension: completing unscoped (C-style) enums
+  __metafn_define_unscoped_enum,
+
+  // P3867: define_encoded_static_string
+  __metafn_define_encoded_static_string,
 
   // Expression reflection metafunctions
   __metafn_is_expression,
@@ -2177,6 +2195,30 @@ consteval auto has_attribute(
   return __metafunction(detail::__metafn_has_attribute, entity, attribute, policy);
 }
 
+consteval auto has_attribute_namespace(info entity) -> bool {
+  return __metafunction(detail::__metafn_has_attribute_namespace, entity);
+}
+
+consteval auto attribute_token_of(info entity) -> string_view {
+  return __metafunction(detail::__metafn_attribute_token_of, ^^const char *,
+                        entity, /*UTF8=*/false);
+}
+
+consteval auto attribute_namespace_of(info entity) -> string_view {
+  return __metafunction(detail::__metafn_attribute_namespace_of, ^^const char *,
+                        entity, /*UTF8=*/false);
+}
+
+consteval auto u8attribute_token_of(info entity) -> u8string_view {
+  return __metafunction(detail::__metafn_attribute_token_of, ^^const char8_t *,
+                        entity, /*UTF8=*/true);
+}
+
+consteval auto u8attribute_namespace_of(info entity) -> u8string_view {
+  return __metafunction(detail::__metafn_attribute_namespace_of, ^^const char8_t *,
+                        entity, /*UTF8=*/true);
+}
+
 // Returns whether the reflected entity is a clang scoped attribute.
 consteval auto is_unscoped_attribute(info r) -> bool {
   return __metafunction(detail::__metafn_is_unscoped_attribute, r);
@@ -2212,34 +2254,22 @@ consteval auto attributes_of(info r) -> vector<info> {
 consteval auto attributes_of(info r,
                              std::string_view    name,
                              AttributeNamespace ns = AttributeNamespace::None) -> vector<info> {
-  using namespace std::literals;
-
-  // For demo purpose, it's ok enough
-  // Alternative is to pass it up to the metafunction but we'd have to break our stateless iterator
-  // model.... For now, it s just not worth it (again, it's a demo).
-  auto getIdPart = [](std::string_view token) {
-    if (auto sep = token.find("::"sv); sep != std::string_view::npos && sep + 2 < token.size() ) {
-      return token.substr(sep + 2);
-    }
-    return std::string_view{};
-  };
-
   auto all = attributes_of(r);
   vector<info> result;
   for (auto attribute : all) {
     bool match = false;
     switch (ns) {
       case AttributeNamespace::None:
-        match = is_unscoped_attribute(attribute) && identifier_of(attribute) == name;
+        match = is_unscoped_attribute(attribute) && attribute_token_of(attribute) == name;
         break;
       case AttributeNamespace::Clang:
-        match = is_clang_attribute(attribute) && getIdPart(identifier_of(attribute)) == name;
+        match = is_clang_attribute(attribute) && attribute_token_of(attribute) == name;
         break;
       case AttributeNamespace::GCC:
-        match = is_gcc_attribute(attribute) && getIdPart(identifier_of(attribute)) == name;
+        match = is_gcc_attribute(attribute) && attribute_token_of(attribute) == name;
         break;
       case AttributeNamespace::MSVC:
-        match = is_msvc_attribute(attribute) && getIdPart(identifier_of(attribute)) == name;
+        match = is_msvc_attribute(attribute) && attribute_token_of(attribute) == name;
         break;
       default: break;
     }
@@ -2550,6 +2580,19 @@ consteval auto define_enum(info targetEnum, R&& members) {
   );
 }
 
+// Like 'define_enum', but completes an unscoped (C-style) enum instead of a
+// scoped one. Note that, per ordinary unscoped-enum semantics, the resulting
+// enumerators are visible unqualified in the enclosing scope.
+template <reflection_range R = initializer_list<info>>
+consteval auto define_unscoped_enum(info targetEnum, R&& members) {
+  return __metafunction(
+    detail::__metafn_define_unscoped_enum,
+    targetEnum,
+    ranges::size(members),
+    ranges::data(members)
+  );
+}
+
 // Returns a reflection representing a description of a data member, which may
 // be used with 'define_aggregate' to define a record type.
 consteval auto data_member_spec(info member_type,
@@ -2560,7 +2603,13 @@ consteval auto data_member_spec(info member_type,
   bool has_name = options.name.has_value();
   int alignment = options.alignment.value_or(0);
   int width = options.width.value_or(0);
+  // 'no_unique_address' is intentionally deprecated in favor of
+  // '.attributes = { ^^[[no_unique_address]] }', but is still honored here for
+  // backward compatibility; suppress the deprecation warning at this read site.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
   bool no_unique_address = options.no_unique_address;
+#pragma clang diagnostic pop
 
   if (width) {
     if (alignment)
@@ -2794,6 +2843,35 @@ consteval auto define_static_string(string_view in) -> const char * {
 consteval auto define_static_string(u8string_view in) -> const char8_t * {
   meta::info array = meta::reflect_constant_string(in);
   return extract<const char8_t*>(array);
+}
+
+// P3867: transcode a UTF-8 sequence into a string literal in the associated
+// encoding of CharT. String-literal trailing NULs are dropped by
+// reflect_constant_string ([meta.define.static]).
+template <class CharT>
+consteval auto __define_encoded_static_string(u8string_view in) -> const CharT * {
+  const char8_t *utf8 = define_static_string(in);
+  if constexpr (same_as<CharT, char8_t>)
+    return utf8;
+  return __metafunction(meta::detail::__metafn_define_encoded_static_string,
+                        ^^const CharT *, utf8, in.size());
+}
+
+template <class CharT, ranges::input_range R>
+  requires same_as<char8_t, ranges::range_value_t<R>>
+consteval auto define_encoded_static_string(R &&r) -> const CharT * {
+  static_assert(same_as<CharT, char> || same_as<CharT, wchar_t> ||
+                    same_as<CharT, char8_t> || same_as<CharT, char16_t> ||
+                    same_as<CharT, char32_t>,
+                "CharT must be char, wchar_t, char8_t, char16_t, or char32_t");
+
+  if constexpr (convertible_to<R, u8string_view>) {
+    return __define_encoded_static_string<CharT>(r);
+  } else {
+    vector<char8_t> seq(from_range, r);
+    return __define_encoded_static_string<CharT>(
+        u8string_view(seq.data(), seq.size()));
+  }
 }
 
 _LIBCPP_END_NAMESPACE_STD
