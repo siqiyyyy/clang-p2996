@@ -28,10 +28,11 @@ jobs:
             lld \
             python3 \
             zlib1g-dev \
+            libblocksruntime-dev \
             git
 
       - name: Build Clang
-        continue-on-error: true
+        id: build
         run: |
           cmake -G "Ninja" -S llvm -B build-llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_UNREACHABLE_OPTIMIZE=ON -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" -DLLVM_ENABLE_PROJECTS="clang" -DLLVM_FORCE_VC_REPOSITORY=https://github.com/bloomberg/clang-p2996
           ninja cxx -j16 -C build-llvm/
@@ -41,3 +42,13 @@ jobs:
           cd build-llvm
           bin/llvm-lit -v tools/clang/test/Reflection
 
+      # <meta>-based tests live in the libc++ suite, which the clang lit run
+      # above does not cover (and upstream's libcxx workflows only run on
+      # llvm/llvm-project).
+      - name: Test Reflection (libc++)
+        # Run even if the clang lit step failed, so both suites always report.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          LIT_FILTER: std/experimental/reflection/
+          LIT_OPTS: -v
+        run: ninja -j16 -C build-llvm check-cxx
