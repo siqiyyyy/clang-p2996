@@ -1,9 +1,21 @@
-// conditional-expression-reflection.cpp — Tests for reflection of the
+//===----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+// UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
+// ADDITIONAL_COMPILE_FLAGS: -freflection -fexpansion-statements
+
+// <experimental/reflection>
+//
+// [reflection]
+
+// Tests for reflection of the
 // conditional (ternary) operator: is_conditional_operator, condition_of,
 // true_expression_of, false_expression_of.
-//
-// RUN: %clang_cc1 -std=c++26 -freflection -fexpansion-statements %s -verify
-// expected-no-diagnostics
 
 #include <meta>
 
@@ -82,3 +94,5 @@ namespace test_splice {
   constexpr int v = [:^^{ x < y ? x : y }:];
   static_assert(v == 3);
 }
+
+int main() {}
