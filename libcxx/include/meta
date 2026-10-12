@@ -2507,6 +2507,11 @@ consteval info declared_variable_of(info r) {
   return __metafunction(detail::__metafn_declared_variable_of, r);
 }
 
+// The underlying expression of an expression statement.
+consteval info expression_of(info r) {
+  return __metafunction(detail::__metafn_expression_of, r);
+}
+
 
 // Representation of a data member which may be passed to 'data_member_spec'.
 struct data_member_options {
