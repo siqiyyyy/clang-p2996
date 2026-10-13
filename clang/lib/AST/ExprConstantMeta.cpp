@@ -7815,7 +7815,7 @@ bool expression_kind_of(APValue &Result, ASTContext &C, MetaActions &Meta,
 
   // expr_kind values: literal=0, decl_ref=1, binary_op=2, unary_op=3,
   // call=4, member_access=5, conditional=6, cast=7, construct=8,
-  // subscript=9, comma=10
+  // subscript=9
   size_t Kind;
   switch (E->getStmtClass()) {
   case Stmt::IntegerLiteralClass:
@@ -7830,15 +7830,9 @@ bool expression_kind_of(APValue &Result, ASTContext &C, MetaActions &Meta,
     Kind = 1; // decl_ref
     break;
   case Stmt::BinaryOperatorClass:
-  case Stmt::CompoundAssignOperatorClass: {
-    auto *BO = cast<BinaryOperator>(E);
-    if (BO->getOpcode() == BO_Comma) {
-      Kind = 10; // comma
-    } else {
-      Kind = 2; // binary_op
-    }
+  case Stmt::CompoundAssignOperatorClass:
+    Kind = 2; // binary_op
     break;
-  }
   case Stmt::UnaryOperatorClass:
     Kind = 3; // unary_op
     break;
