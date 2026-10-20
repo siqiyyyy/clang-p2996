@@ -15,7 +15,7 @@
 
 // Tests for function/statement reflection:
 // body_of, statements_of, the is_*_statement predicates, return_value_of,
-// declared_variable_of, initializer_of.
+// declared_variable_of, initializers_of.
 
 #include <meta>
 
@@ -49,14 +49,27 @@ namespace test_return {
   static_assert(expression_operator_of(ret) == operators::op_plus);
 }
 
-// declared_variable_of -> the variable `a`; initializer_of(a) -> `x * y`.
+// declared_variable_of -> the variable `a`; initializers_of(a) -> {`x * y`}.
 namespace test_decl {
   constexpr auto s0 = statements_of(body_of(^^f))[0];
   constexpr auto va = declared_variable_of(s0);
-  constexpr auto init = initializer_of(va);
+  static_assert(initializers_of(va).size() == 1);
+  constexpr auto init = initializers_of(va)[0];
   static_assert(is_expression(init));
   static_assert(is_binary_operator(init));
   static_assert(expression_operator_of(init) == operators::op_star);
+}
+
+// A variable declared without an initializer has none.
+namespace test_no_initializer {
+  constexpr double g(double x) {
+    double t;
+    t = x;
+    return t;
+  }
+  static_assert(initializers_of(
+                    declared_variable_of(statements_of(body_of(^^g))[0]))
+                    .empty());
 }
 
 // Expression-statement children come back as *statement* reflections (uniform

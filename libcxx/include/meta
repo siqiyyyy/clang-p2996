@@ -2370,7 +2370,8 @@ consteval bool is_literal(info r) {
          __metafunction(detail::__metafn_expression_kind_of, r) == 0;
 }
 
-consteval bool is_variable_reference(info r) {
+// A name used as an expression (an id-expression), e.g. `x` or `std::pi`.
+consteval bool is_id_expression(info r) {
   return is_expression(r) &&
          __metafunction(detail::__metafn_expression_kind_of, r) == 1;
 }
@@ -2420,8 +2421,9 @@ consteval info callee_of(info r) {
   return __metafunction(detail::__metafn_expression_callee_of, r);
 }
 
-consteval info declaration_of(info r) {
-  return __metafunction(detail::__metafn_expression_declaration_of, r);
+// The declarations an id-expression refers to: one, for a name like `x`.
+consteval auto declarators_of(info r) -> vector<info> {
+  return {__metafunction(detail::__metafn_expression_declaration_of, r)};
 }
 
 consteval operators expression_operator_of(info r) {
@@ -2445,10 +2447,14 @@ consteval info false_expression_of(info r) {
 }
 
 
-// Declaration accessor: the initializer expression of a reflected variable.
-// (Operates on a variable declaration, not a statement.)
-consteval info initializer_of(info r) {
-  return __metafunction(detail::__metafn_initializer_of, r);
+// Declaration accessor: the initializer expressions of a reflected variable;
+// one for `T v = expr;`, none for `T v;`. (Operates on a variable declaration,
+// not a statement.)
+consteval auto initializers_of(info r) -> vector<info> {
+  info init = __metafunction(detail::__metafn_initializer_of, r);
+  if (is_expression(init))
+    return {init};
+  return {};
 }
 
 

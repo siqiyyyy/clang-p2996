@@ -30,7 +30,7 @@ static_assert(!is_binary_operator(^^{ 42 }));
 
 namespace test_decl_ref {
   int x = 0;
-  static_assert(is_variable_reference(^^{ x }));
+  static_assert(is_id_expression(^^{ x }));
   static_assert(!is_literal(^^{ x }));
 }
 
@@ -52,13 +52,14 @@ namespace test_call {
   static_assert(is_function_call(^^{ f(1) }));
 }
 
-// declaration_of: extract the variable from a decl_ref
-namespace test_declaration_of {
+// declarators_of: the variable an id-expression names
+namespace test_declarators_of {
   int x = 0;
   int y = 0;
-  static_assert(declaration_of(^^{ x }) == ^^x);
-  static_assert(declaration_of(^^{ y }) == ^^y);
-  static_assert(declaration_of(^^{ x }) != ^^y);
+  static_assert(declarators_of(^^{ x }).size() == 1);
+  static_assert(declarators_of(^^{ x })[0] == ^^x);
+  static_assert(declarators_of(^^{ y })[0] == ^^y);
+  static_assert(declarators_of(^^{ x })[0] != ^^y);
 }
 
 // operands_of: get children of binary_op.
@@ -76,12 +77,12 @@ namespace test_operands {
   static_assert(operands_of(^^{ a + b }).size() == 2);
   static_assert(is_cast(operands_of(^^{ a + b })[0]));
   static_assert(
-      is_variable_reference(operands_of(operands_of(^^{ a + b })[0])[0]));
+      is_id_expression(operands_of(operands_of(^^{ a + b })[0])[0]));
   static_assert(
-      is_variable_reference(operands_of(operands_of(^^{ a + b })[1])[0]));
-  static_assert(declaration_of(operands_of(operands_of(^^{ a + b })[0])[0]) ==
+      is_id_expression(operands_of(operands_of(^^{ a + b })[1])[0]));
+  static_assert(declarators_of(operands_of(operands_of(^^{ a + b })[0])[0])[0] ==
                 ^^a);
-  static_assert(declaration_of(operands_of(operands_of(^^{ a + b })[1])[0]) ==
+  static_assert(declarators_of(operands_of(operands_of(^^{ a + b })[1])[0])[0] ==
                 ^^b);
 }
 
